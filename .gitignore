@@ -1,0 +1,64 @@
+# ------------------------------------------------------------------------------
+# Go (Golang)
+# ------------------------------------------------------------------------------
+# Binaries and build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+*.pprof
+
+# Dependency directories (remove if you check in vendor)
+vendor/
+
+# Go workspace file
+go.work
+
+# ------------------------------------------------------------------------------
+# Environment & Secrets (Crucial for Postgres/Redis credentials)
+# ------------------------------------------------------------------------------
+# Never commit your .env files containing database URLs or passwords
+.env
+.env*.local
+*.pem
+*.key
+
+# ------------------------------------------------------------------------------
+# Redis
+# ------------------------------------------------------------------------------
+# Local Redis persistence files (if running local instances inside the repo)
+dump.rdb
+appendonly.aof
+
+# ------------------------------------------------------------------------------
+# PostgreSQL / Database
+# ------------------------------------------------------------------------------
+# Ignore local database data directories (common if using Docker Compose volumes)
+postgres-data/
+pgdata/
+data/
+db/
+
+# SQL dumps (optional: keep if they are schema, ignore if actual data export)
+# *.sql
+
+# ------------------------------------------------------------------------------
+# IDEs & Editors
+# ------------------------------------------------------------------------------
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# JetBrains (GoLand)
+.idea/
+*.iml
+
+# ------------------------------------------------------------------------------
+# OS Specific
+# ------------------------------------------------------------------------------
+.DS_Store
+Thumbs.db

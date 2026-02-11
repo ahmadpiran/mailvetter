@@ -1,0 +1,35 @@
+services:
+  api:
+    build: .
+    container_name: mailvetter-api
+    restart: always
+    environment: 
+      - PORT=8080
+      - HIBP_API_KEY=${HIBP_API_KEY}
+    expose:
+      - "8080"
+    networks:
+      - mv-net
+
+  # The Web Server
+  caddy:
+    image: caddy:latest
+    container_name: caddy_proxy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    command: caddy reverse-proxy --from mailvetter.com --to api:8080
+    networks:
+      - mv-net
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  mv-net:
+    driver: bridge
