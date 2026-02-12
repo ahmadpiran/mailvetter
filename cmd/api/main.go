@@ -41,6 +41,7 @@ func main() {
 
 	// 3. Define Handlers
 	http.HandleFunc("/verify", enableCORS(verifyHandler))
+	http.HandleFunc("/upload", enableCORS(uploadHandler))
 	http.HandleFunc("/info", enableCORS(infoHandler))
 	http.HandleFunc("/", homeHandler)
 

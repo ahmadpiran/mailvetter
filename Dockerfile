@@ -12,7 +12,7 @@ RUN go mod download
 COPY . .
 
 # CGO_ENABLED=0 creates a statically linked binary (no dependency on OS libraries)
-RUN CGO_ENABLED=0 GOOS=linux go build -o mailvetter cmd/api/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o mailvetter ./cmd/api
 
 
 # --- Runner ---
