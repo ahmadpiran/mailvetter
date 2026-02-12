@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"time"
 
+	"mailvetter/internal/queue"
 	"mailvetter/internal/store"
 
 	"github.com/google/uuid"
 )
 
-// UploadResponse is what we send back to the user
 type UploadResponse struct {
 	JobID     string `json:"job_id"`
 	TotalRows int    `json:"total_rows"`
@@ -35,7 +35,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, "Missing 'file' parameter in form data", http.StatusBadRequest)
+		http.Error(w, "Missing 'file' parameter", http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
@@ -53,8 +53,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid CSV format", http.StatusBadRequest)
 			return
 		}
-
-		// Assume email is in the first column (simple for now)
 		if len(record) > 0 && record[0] != "" {
 			emails = append(emails, record[0])
 		}
@@ -69,7 +67,6 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	jobID := uuid.New().String()
 	ctx := r.Context()
 
-	// We insert the job with status 'pending'
 	query := `INSERT INTO jobs (id, status, total_count, created_at) VALUES ($1, 'pending', $2, $3)`
 	_, err = store.DB.Exec(ctx, query, jobID, len(emails), time.Now())
 	if err != nil {
@@ -78,12 +75,19 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Return Success
+	// 5. Push to Redis Queue
+	if err := queue.EnqueueBatch(ctx, jobID, emails); err != nil {
+		fmt.Printf("Redis Error: %v\n", err)
+		http.Error(w, "Failed to queue tasks", http.StatusInternalServerError)
+		return
+	}
+
+	// 6. Return Success
 	w.Header().Set("Content-Type", "application/json")
 	resp := UploadResponse{
 		JobID:     jobID,
 		TotalRows: len(emails),
-		Message:   "Job created successfully. Processing started.",
+		Message:   "Job created and queued. Processing started.",
 	}
 	json.NewEncoder(w).Encode(resp)
 }
