@@ -5,19 +5,33 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
+	"mailvetter/internal/queue"
 	"mailvetter/internal/validator"
 )
 
 func main() {
-	// 1. Define Handlers
+	// 1. Initialize Redis
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "127.0.0.1:6379" // Fallback for local testing outside docker
+	}
+
+	fmt.Printf("🔌 Connecting to Redis at %s...\n", redisAddr)
+	if err := queue.Init(redisAddr); err != nil {
+		log.Fatalf("❌ Failed to connect to Redis: %v", err)
+	}
+	fmt.Println("✅ Connected to Redis Queue")
+
+	// 2. Define Handlers
 	http.HandleFunc("/verify", enableCORS(verifyHandler))
 	http.HandleFunc("/info", enableCORS(infoHandler))
 	http.HandleFunc("/", homeHandler)
 
-	// 2. Server Configuration
+	// 3. Server Configuration
 	server := &http.Server{
 		Addr:         ":8080",
 		ReadTimeout:  30 * time.Second, // Allow enough time for deep probes
