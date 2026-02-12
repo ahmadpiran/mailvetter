@@ -2,6 +2,7 @@ services:
   api:
     image: ghcr.io/ahmadpiran/mailvetter:latest
     container_name: mailvetter-api
+    command: ["./api-server"]
     restart: always
     environment: 
       - PORT=8080
@@ -15,6 +16,21 @@ services:
       - "8080:8080"
     networks:
       - mv-net
+
+  worker:
+    image: ghcr.io/ahmadpiran/mailvetter:latest
+    container_name: mailvetter-worker
+    command: ["./worker-process"]
+    restart: always
+    environment:
+      - HIBP_API_KEY=${HIBP_API_KEY}
+      - REDIS_ADDR=redis:6379
+      - DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db
+    networks:
+      - mv-net
+    depends_on:
+      - redis
+      - postgres
 
   caddy:
     image: caddy:latest

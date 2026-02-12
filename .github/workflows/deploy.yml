@@ -19,14 +19,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 1. Test with Go 1.25
+      # 1. Test with Go 1.25 (Updated to test ALL packages)
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
           
       - name: Run Unit Tests
-        run: go test ./internal/validator/... -v
+        run: go test ./... -v
 
       # 2. Login to Container Registry
       - name: Log in to the Container registry
@@ -36,7 +36,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3. Build & Push
+      # 3. Build & Push (Builds the image containing BOTH binaries)
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -52,7 +52,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 1. Copy the production compose file to the server
+      # 1. Prepare Directory (Prevents SCP errors if folder doesn't exist)
+      - name: Prepare Server Directory
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: mkdir -p /root/app
+
+      # 2. Copy the production compose file to the server
       - name: Copy Compose File to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -60,9 +69,9 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           source: "docker-compose.prod.yml"
-          target: "/root/app"
+          target: "/root/app/docker-compose.prod.yml" 
 
-      # 2. SSH and Restart
+      # 3. SSH and Restart
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -70,11 +79,9 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            # Create directory if it doesn't exist
-            mkdir -p /root/app
             cd /root/app
 
-            # Rename the copied file to standard docker-compose.yml for simplicity
+            # Rename for simplicity
             mv docker-compose.prod.yml docker-compose.yml
 
             # Login to GHCR
@@ -83,8 +90,9 @@ jobs:
             # Pull new image
             docker compose pull
             
-            # Restart containers (Injecting the API Key)
-            HIBP_API_KEY=${{ secrets.HIBP_API_KEY }} docker compose up -d
+            # Restart containers
+            # --remove-orphans cleans up any old containers from previous versions
+            HIBP_API_KEY=${{ secrets.HIBP_API_KEY }} docker compose up -d --remove-orphans
             
-            # Cleanup
+            # Cleanup old images to save disk space
             docker image prune -f
