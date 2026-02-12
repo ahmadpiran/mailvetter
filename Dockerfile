@@ -5,14 +5,18 @@ WORKDIR /app
 
 RUN apk add --no-cache git
 
-COPY go.mod ./
+COPY go.mod go.sum ./
 
 RUN go mod download
 
 COPY . .
 
+# Build API Binary
 # CGO_ENABLED=0 creates a statically linked binary (no dependency on OS libraries)
-RUN CGO_ENABLED=0 GOOS=linux go build -o mailvetter ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -o api-server ./cmd/api
+
+# Build Worker Binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o worker-process cmd/worker/main.go
 
 
 # --- Runner ---
@@ -24,10 +28,9 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /home/appuser/
 
-COPY --from=builder /app/mailvetter .
+COPY --from=builder /app/api-server .
+COPY --from=builder /app/worker-process .
 
-RUN chown appuser:appgroup ./mailvetter
+RUN chown appuser:appgroup ./
 
-EXPOSE 8080
-
-CMD ["./mailvetter"]
+USER appuser
