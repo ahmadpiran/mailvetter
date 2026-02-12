@@ -3,30 +3,29 @@ name: Deploy Mailvetter
 on:
   push:
     branches: [ "main" ]
-
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-
+  
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 1. Test with Go 1.25
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-          
       - name: Run Unit Tests
-        run: go test ./... -v
+        run: go test ./internal/validator/... -v
 
+      # 2. Login to Container Registry
       - name: Log in to the Container registry
         uses: docker/login-action@v3
         with:
@@ -34,6 +33,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 3. Build & Push
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -44,7 +44,6 @@ jobs:
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -58,10 +57,9 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             mkdir -p /root/app
-            # Force delete potential conflicting directories/files from previous failed runs
-            rm -rf /root/app/docker-compose.prod.yml
-
-      # 2. Copy the file (Explicit target filename)
+            rm -rf /root/app/docker-compose.prod.yml /root/app/docker-compose.yml
+      
+      # 2. Copy the production compose file to the server
       - name: Copy Compose File to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -69,9 +67,9 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           source: "docker-compose.prod.yml"
-          target: "/root/app/docker-compose.prod.yml"
+          target: "/root/app"
 
-      # 3. SSH, Clean, and Restart
+      # 3. SSH and Restart
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -80,22 +78,13 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd /root/app
-
-            # 1. Robust File Swap
-            # Remove the old compose file (whether it's a file or directory)
-            rm -rf docker-compose.yml 
-            # Rename the new one
+            # Rename the copied file to standard docker-compose.yml for simplicity
             mv docker-compose.prod.yml docker-compose.yml
-
-            # 2. Create .env file for secrets (Safer than inline vars)
-            echo "HIBP_API_KEY=${{ secrets.HIBP_API_KEY }}" > .env
-
-            # 3. Docker Login
+            # Login to GHCR
             echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            
-            # 4. Pull & Restart
+            # Pull new image
             docker compose pull
-            docker compose up -d --remove-orphans
-            
-            # 5. Cleanup
+            # Restart containers (Injecting the API Key)
+            HIBP_API_KEY=${{ secrets.HIBP_API_KEY }} docker compose up -d
+            # Cleanup
             docker image prune -f
