@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"mailvetter/internal/queue"
+	"mailvetter/internal/store"
 	"mailvetter/internal/validator"
 )
 
@@ -26,12 +27,24 @@ func main() {
 	}
 	fmt.Println("✅ Connected to Redis Queue")
 
-	// 2. Define Handlers
+	// 2. Initialize Database (NEW)
+	dbURL := os.Getenv("DB_URL")
+	if dbURL == "" {
+		// Default for local testing if env is missing
+		dbURL = "postgres://mv_user:mv_password@localhost:5432/mailvetter_db"
+	}
+	fmt.Println("🔌 Connecting to Database...")
+	if err := store.Init(dbURL); err != nil {
+		log.Fatalf("❌ Failed to connect to DB: %v", err)
+	}
+	fmt.Println("✅ Connected to PostgreSQL & Migrations Applied")
+
+	// 3. Define Handlers
 	http.HandleFunc("/verify", enableCORS(verifyHandler))
 	http.HandleFunc("/info", enableCORS(infoHandler))
 	http.HandleFunc("/", homeHandler)
 
-	// 3. Server Configuration
+	// 4. Server Configuration
 	server := &http.Server{
 		Addr:         ":8080",
 		ReadTimeout:  30 * time.Second, // Allow enough time for deep probes

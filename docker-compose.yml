@@ -7,8 +7,10 @@ services:
       - PORT=8080
       - HIBP_API_KEY=${HIBP_API_KEY}
       - REDIS_ADDR=redis:6379
+      - DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db
     depends_on:
       - redis
+      - postgres
     expose:
       - "8080"
     networks:
@@ -38,9 +40,25 @@ services:
     networks:
       - mv-net
 
+  postgres:
+    image: postgres:18-alpine
+    container_name: mailvetter-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: mv_user
+      POSTGRES_PASSWORD: mv_password
+      POSTGRES_DB: mailvetter_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - mv-net
+
 volumes:
   caddy_data:
   caddy_config:
+  postgres_data:
 
 networks:
   mv-net:
