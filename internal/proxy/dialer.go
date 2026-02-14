@@ -9,8 +9,6 @@ import (
 	netproxy "golang.org/x/net/proxy"
 )
 
-// DialContext behaves exactly like net.Dialer.DialContext, but automatically
-// routes the TCP connection through a SOCKS5 proxy if the manager is enabled.
 func DialContext(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
 	directDialer := &net.Dialer{Timeout: timeout}
 
@@ -23,17 +21,38 @@ func DialContext(ctx context.Context, network, addr string, timeout time.Duratio
 		return directDialer.DialContext(ctx, network, addr)
 	}
 
+	// Force Local DNS Resolution
+	// By default, Go sends the hostname to the proxy server. If the proxy
+	// does not support DNS, it fails. We resolve it to an IP locally first.
+	host, port, err := net.SplitHostPort(addr)
+	if err == nil {
+		// Only look up if it's not already an IP address
+		if net.ParseIP(host) == nil {
+			ips, lookupErr := net.LookupIP(host)
+			if lookupErr == nil && len(ips) > 0 {
+				// Prefer IPv4 because some proxies don't support IPv6
+				resolvedIP := ips[0].String()
+				for _, ip := range ips {
+					if ip.To4() != nil {
+						resolvedIP = ip.String()
+						break
+					}
+				}
+				addr = net.JoinHostPort(resolvedIP, port)
+				log.Printf("[DEBUG-PROXY] Resolved target locally to IP: %s", addr)
+			}
+		}
+	}
+
 	log.Printf("[DEBUG-PROXY] Dialing %s via proxy %s", addr, u.Host)
 	start := time.Now()
 
-	// Create the proxy dialer (This supports "socks5://user:pass@ip:port" URLs natively)
 	pdialer, err := netproxy.FromURL(u, directDialer)
 	if err != nil {
 		log.Printf("[DEBUG-PROXY] Failed to parse proxy URL: %v", err)
 		return nil, err
 	}
 
-	// Try to use ContextDialer if the underlying proxy supports it (for timeout handling)
 	var conn net.Conn
 	if cdialer, ok := pdialer.(netproxy.ContextDialer); ok {
 		conn, err = cdialer.DialContext(ctx, network, addr)
