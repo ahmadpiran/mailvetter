@@ -3,6 +3,7 @@ package lookup
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/smtp"
 	"net/textproto"
 	"strings"
@@ -30,7 +31,10 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 	// If the proxy is slow or the server is tarpitting us, this prevents infinite hangs.
 	conn.SetDeadline(time.Now().Add(12 * time.Second))
 
+	log.Printf("[DEBUG-SMTP] [%s] TCP connected. Waiting for 220 greeting...", mxHost)
 	client, err := smtp.NewClient(conn, mxHost)
+	log.Printf("[DEBUG-SMTP] [%s] smtp.NewClient finished. Err: %v", mxHost, err)
+
 	if err != nil {
 		conn.Close()
 		return false, 0, fmt.Errorf("client handshake failed: %w", err)

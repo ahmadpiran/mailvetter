@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"math"
 	"os"
 	"sort"
@@ -58,6 +59,8 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		log.Printf("[DEBUG] Collector A (Infra) STARTED for %s", domain)
+		defer log.Printf("[DEBUG] Collector A (Infra) DONE for %s", domain)
 
 		// 1. Check Cache
 		cacheKey := "infra:" + domain
@@ -104,6 +107,8 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		log.Printf("[DEBUG] Collector B (SMTP) STARTED for %s", domain)
+		defer log.Printf("[DEBUG] Collector B (SMTP) DONE for %s", domain)
 
 		// DNS Lookup is fast, but we could cache MX IPs too if needed.
 		// For now, we stick to standard lookup.
@@ -178,6 +183,8 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		log.Printf("[DEBUG] Collector C (Probes) STARTED for %s", email)
+		defer log.Printf("[DEBUG] Collector C (Probes) DONE for %s", email)
 
 		var hasGCal, hasTeams, hasSharePoint, hasAdobe, hasGravatar, hasGitHub bool
 		var breachCount int
