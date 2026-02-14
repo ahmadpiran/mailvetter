@@ -9,13 +9,24 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"mailvetter/internal/proxy"
 )
 
+// sharedClient dynamically routes traffic through proxies if they are enabled
 var sharedClient = &http.Client{
 	Timeout: 5 * time.Second,
 	Transport: &http.Transport{
+		// This function runs on EVERY request
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			if proxy.Enabled() {
+				return proxy.Global.Next(), nil
+			}
+			return nil, nil // Fallback to direct connection if no proxies
+		},
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
