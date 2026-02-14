@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,12 @@ func CheckDNS(ctx context.Context, domain string) ([]*net.MX, error) {
 
 	if len(mxRecords) == 0 {
 		return nil, fmt.Errorf("no MX records found for domain")
+	}
+
+	// Strip the trailing dot from Go's FQDN format.
+	// SOCKS5 proxies will fail to resolve hostnames if they end in a dot.
+	for _, mx := range mxRecords {
+		mx.Host = strings.TrimSuffix(mx.Host, ".")
 	}
 
 	return mxRecords, nil
