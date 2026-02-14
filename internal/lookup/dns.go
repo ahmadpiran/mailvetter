@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"mailvetter/internal/proxy"
 )
 
 // MXRecord holds the simplified result of an MX lookup
@@ -22,10 +24,7 @@ func CheckDNS(ctx context.Context, domain string) ([]*net.MX, error) {
 	r := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{
-				Timeout: 3 * time.Second, // Fail fast if DNS is slow
-			}
-			return d.DialContext(ctx, network, address)
+			return proxy.DialContext(ctx, network, address, 3*time.Second)
 		},
 	}
 

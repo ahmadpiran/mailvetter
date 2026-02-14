@@ -8,6 +8,8 @@ import (
 	"net/textproto"
 	"strings"
 	"time"
+
+	"mailvetter/internal/proxy"
 )
 
 const (
@@ -17,10 +19,9 @@ const (
 
 // CheckSMTP performs a standard probe.
 func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, time.Duration, error) {
-	d := net.Dialer{Timeout: 5 * time.Second}
 	start := time.Now()
+	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 5*time.Second)
 
-	conn, err := d.DialContext(ctx, "tcp", mxHost+":25")
 	if err != nil {
 		return false, 0, fmt.Errorf("connection failed: %w", err)
 	}
@@ -75,8 +76,8 @@ func CheckPostmaster(ctx context.Context, mxHost, domain string) bool {
 
 // CheckVRFY attempts to verify the user using the VRFY command.
 func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
-	d := net.Dialer{Timeout: 4 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", mxHost+":25")
+	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 4*time.Second)
+
 	if err != nil {
 		return false
 	}
