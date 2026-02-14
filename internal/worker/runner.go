@@ -38,7 +38,7 @@ func Start() {
 
 		// 3. PROCESS: Run the Email Verification
 		// We create a timeout context for the validation itself
-		valCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		valCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 
 		parts, _ := validator.VerifyEmail(valCtx, task.Email, extractDomain(task.Email))
 		// Note: We ignore the error variable (_) because VerifyEmail handles errors internally

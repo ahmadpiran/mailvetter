@@ -3,7 +3,6 @@ package lookup
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/smtp"
 	"net/textproto"
 	"strings"
@@ -20,14 +19,15 @@ const (
 // CheckSMTP performs a standard probe.
 func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, time.Duration, error) {
 	start := time.Now()
-	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 5*time.Second)
 
+	// 1. INCREASED TIMEOUT: Proxies need more time to establish the tunnel
+	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 15*time.Second)
 	if err != nil {
 		return false, 0, fmt.Errorf("connection failed: %w", err)
 	}
 
-	host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-	client, err := smtp.NewClient(conn, host)
+	// 2. CRITICAL FIX: Use mxHost directly. SOCKS5 wrappers return weird RemoteAddr strings.
+	client, err := smtp.NewClient(conn, mxHost)
 	if err != nil {
 		conn.Close()
 		return false, 0, fmt.Errorf("client handshake failed: %w", err)
@@ -76,8 +76,8 @@ func CheckPostmaster(ctx context.Context, mxHost, domain string) bool {
 
 // CheckVRFY attempts to verify the user using the VRFY command.
 func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
-	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 4*time.Second)
-
+	// INCREASED TIMEOUT
+	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
 	if err != nil {
 		return false
 	}

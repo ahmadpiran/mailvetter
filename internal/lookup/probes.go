@@ -18,7 +18,7 @@ import (
 
 // sharedClient dynamically routes traffic through proxies if they are enabled
 var sharedClient = &http.Client{
-	Timeout: 5 * time.Second,
+	Timeout: 15 * time.Second,
 	Transport: &http.Transport{
 		// This function runs on EVERY request
 		Proxy: func(req *http.Request) (*url.URL, error) {
