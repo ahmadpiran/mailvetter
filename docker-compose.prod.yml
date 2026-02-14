@@ -9,6 +9,7 @@ services:
       - HIBP_API_KEY=${HIBP_API_KEY}
       - REDIS_ADDR=redis:6379
       - DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db
+      - PROXY_LIST=${PROXY_LIST}
     depends_on:
       - redis
       - postgres
@@ -26,6 +27,7 @@ services:
       - HIBP_API_KEY=${HIBP_API_KEY}
       - REDIS_ADDR=redis:6379
       - DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db
+      - PROXY_LIST=${PROXY_LIST}
     networks:
       - mv-net
     depends_on:

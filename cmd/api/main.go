@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"mailvetter/internal/proxy"
 	"mailvetter/internal/queue"
 	"mailvetter/internal/store"
 	"mailvetter/internal/validator"
@@ -39,14 +40,26 @@ func main() {
 	}
 	fmt.Println("✅ Connected to PostgreSQL & Migrations Applied")
 
-	// 3. Define Handlers
+	// 3. Initialize Proxy Manager
+	proxyListRaw := os.Getenv("PROXY_LIST")
+	if proxyListRaw != "" {
+		proxies := strings.Split(proxyListRaw, ",")
+		if err := proxy.Init(proxies); err != nil {
+			log.Fatalf("❌ Failed to initialize proxy manager: %v", err)
+		}
+		fmt.Printf("🛡️  Proxy rotation enabled (%d proxies loaded)\n", len(proxies))
+	} else {
+		fmt.Println("⚠️  No proxies configured. Running with direct connections.")
+	}
+
+	// 4. Define Handlers
 	http.HandleFunc("/verify", enableCORS(verifyHandler))
 	http.HandleFunc("/upload", enableCORS(uploadHandler))
 	http.HandleFunc("/status", enableCORS(statusHandler))
 	http.HandleFunc("/info", enableCORS(infoHandler))
 	http.HandleFunc("/", homeHandler)
 
-	// 4. Server Configuration
+	// 5. Server Configuration
 	server := &http.Server{
 		Addr:         ":8080",
 		ReadTimeout:  30 * time.Second, // Allow enough time for deep probes

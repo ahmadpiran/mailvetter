@@ -3,7 +3,9 @@ package main
 import (
 	"log"
 	"os"
+	"strings"
 
+	"mailvetter/internal/proxy"
 	"mailvetter/internal/queue"
 	"mailvetter/internal/store"
 	"mailvetter/internal/worker"
@@ -32,6 +34,18 @@ func main() {
 	}
 	log.Println("✅ Connected to PostgreSQL")
 
-	// 3. Start the Processing Loop
+	// 3. Initialize Proxy Manager
+	proxyListRaw := os.Getenv("PROXY_LIST")
+	if proxyListRaw != "" {
+		proxies := strings.Split(proxyListRaw, ",")
+		if err := proxy.Init(proxies); err != nil {
+			log.Fatalf("❌ Failed to initialize proxy manager: %v", err)
+		}
+		log.Printf("🛡️  Proxy rotation enabled (%d proxies loaded)\n", len(proxies))
+	} else {
+		log.Println("⚠️  No proxies configured. Running with direct connections.")
+	}
+
+	// 4. Start the Processing Loop
 	worker.Start()
 }
