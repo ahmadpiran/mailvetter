@@ -56,6 +56,7 @@ func main() {
 	http.HandleFunc("/verify", enableCORS(verifyHandler))
 	http.HandleFunc("/upload", enableCORS(uploadHandler))
 	http.HandleFunc("/status", enableCORS(statusHandler))
+	http.HandleFunc("/results", enableCORS(resultsHandler))
 	http.HandleFunc("/info", enableCORS(infoHandler))
 	http.HandleFunc("/", homeHandler)
 
