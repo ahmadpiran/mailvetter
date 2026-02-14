@@ -3,38 +3,33 @@ package lookup
 import (
 	"context"
 	"fmt"
-	"log"
+	"net"
 	"net/smtp"
 	"net/textproto"
 	"strings"
 	"time"
-
-	"mailvetter/internal/proxy"
 )
 
 const (
-	HeloHost = "mta1.mailvetter.com"
+	HeloHost = "mta1.mailvetter.com" // Identify yourself politely
 	MailFrom = "verify@mailvetter.com"
 )
 
-// CheckSMTP performs a standard probe.
+// CheckSMTP performs a standard probe via direct connection.
 func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, time.Duration, error) {
 	start := time.Now()
 
-	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
+	// 1. Direct connection (Bypass proxy for Port 25)
+	d := net.Dialer{Timeout: 10 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", mxHost+":25")
 	if err != nil {
 		return false, 0, fmt.Errorf("connection failed: %w", err)
 	}
 
-	// 🛑 THE ANTI-TARPIT FIX:
-	// Force the connection to violently terminate after 12 seconds.
-	// If the proxy is slow or the server is tarpitting us, this prevents infinite hangs.
+	// 2. Anti-tarpit deadline
 	conn.SetDeadline(time.Now().Add(12 * time.Second))
 
-	log.Printf("[DEBUG-SMTP] [%s] TCP connected. Waiting for 220 greeting...", mxHost)
 	client, err := smtp.NewClient(conn, mxHost)
-	log.Printf("[DEBUG-SMTP] [%s] smtp.NewClient finished. Err: %v", mxHost, err)
-
 	if err != nil {
 		conn.Close()
 		return false, 0, fmt.Errorf("client handshake failed: %w", err)
@@ -60,36 +55,30 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 	return true, elapsed, nil
 }
 
-// CheckPostmaster verifies if the server accepts "postmaster@domain".
-// If this fails (550), the server is non-compliant/broken.
+// CheckPostmaster verifies if the domain accepts emails to postmaster
 func CheckPostmaster(ctx context.Context, mxHost, domain string) bool {
-	// Re-use CheckSMTP but ignore timing
+	// A standard compliant mail server MUST accept mail to postmaster.
 	success, _, err := CheckSMTP(ctx, mxHost, "postmaster@"+domain)
-
-	// If success (250 OK), it's good.
 	if success {
 		return true
 	}
-
-	// If failed, we only care if it was a "User Unknown" (550) error.
-	// A connection timeout doesn't mean "Broken", it means "Down".
-	// A 550 means "I am configured incorrectly".
 	if IsNoSuchUserError(err) {
-		return false // Broken!
+		return false
 	}
-
-	return true // Assume valid if other error (greylist/timeout) to be safe
+	// If rate-limited or timed out, assume true to avoid penalizing the user's score unfairly
+	return true
 }
 
 // CheckVRFY attempts to verify the user using the VRFY command.
 func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
-	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
+	d := net.Dialer{Timeout: 10 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", mxHost+":25")
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
 
-	// 🛑 THE ANTI-TARPIT FIX
+	// Anti-tarpit deadline
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	tp := textproto.NewConn(conn)
@@ -117,36 +106,51 @@ func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
 	return err == nil && (id == 250 || id == 251)
 }
 
-// Helpers
+// --- Helper Functions ---
+
+// IsNoSuchUserError determines if the SMTP error means the mailbox does not exist
 func IsNoSuchUserError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if textErr, ok := err.(*textproto.Error); ok {
-		return textErr.Code == 550
+	errStr := strings.ToLower(err.Error())
+
+	// Standard SMTP error codes for "user unknown"
+	if strings.Contains(errStr, "550") || strings.Contains(errStr, "5.1.1") {
+		return true
 	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "550") || strings.Contains(s, "user unknown") || strings.Contains(s, "does not exist")
+
+	// Provider-specific string matching for common rejections
+	keywords := []string{
+		"does not exist", "user unknown", "no such user",
+		"recipient rejected", "not found", "invalid mailbox",
+		"not a valid mailbox",
+	}
+
+	for _, kw := range keywords {
+		if strings.Contains(errStr, kw) {
+			return true
+		}
+	}
+	return false
 }
 
-func IsGreylisted(err error) bool {
+// IsRateLimitError checks if the server is asking us to slow down
+func IsRateLimitError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if textErr, ok := err.(*textproto.Error); ok {
-		return textErr.Code == 451 || textErr.Code == 450
-	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "451") || strings.Contains(s, "greylist") || strings.Contains(s, "try again later")
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "450") ||
+		strings.Contains(errStr, "451") ||
+		strings.Contains(errStr, "452") ||
+		strings.Contains(errStr, "too many requests") ||
+		strings.Contains(errStr, "rate limit")
 }
 
-func IsSoftBounce(err error) bool {
-	if err == nil {
-		return false
-	}
-	if textErr, ok := err.(*textproto.Error); ok {
-		return textErr.Code == 452
-	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "quota") || strings.Contains(s, "full")
+// IsCatchAll tests a fake email address to see if the server accepts everything
+func IsCatchAll(ctx context.Context, mxHost, domain string) bool {
+	fakeEmail := fmt.Sprintf("bounce-test-%d@%s", time.Now().UnixNano(), domain)
+	success, _, _ := CheckSMTP(ctx, mxHost, fakeEmail)
+	return success
 }
