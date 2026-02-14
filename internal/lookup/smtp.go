@@ -20,13 +20,16 @@ const (
 func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, time.Duration, error) {
 	start := time.Now()
 
-	// 1. INCREASED TIMEOUT: Proxies need more time to establish the tunnel
-	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 15*time.Second)
+	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
 	if err != nil {
 		return false, 0, fmt.Errorf("connection failed: %w", err)
 	}
 
-	// 2. CRITICAL FIX: Use mxHost directly. SOCKS5 wrappers return weird RemoteAddr strings.
+	// 🛑 THE ANTI-TARPIT FIX:
+	// Force the connection to violently terminate after 12 seconds.
+	// If the proxy is slow or the server is tarpitting us, this prevents infinite hangs.
+	conn.SetDeadline(time.Now().Add(12 * time.Second))
+
 	client, err := smtp.NewClient(conn, mxHost)
 	if err != nil {
 		conn.Close()
@@ -76,12 +79,14 @@ func CheckPostmaster(ctx context.Context, mxHost, domain string) bool {
 
 // CheckVRFY attempts to verify the user using the VRFY command.
 func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
-	// INCREASED TIMEOUT
 	conn, err := proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
+
+	// 🛑 THE ANTI-TARPIT FIX
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	tp := textproto.NewConn(conn)
 	defer tp.Close()
