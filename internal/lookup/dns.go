@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net"
 	"time"
-
-	"mailvetter/internal/proxy"
 )
 
 // MXRecord holds the simplified result of an MX lookup
@@ -16,24 +14,21 @@ type MXRecord struct {
 }
 
 // CheckDNS performs the initial domain validation and MX lookup.
-// It returns a list of MX records or an error if the domain is invalid.
 func CheckDNS(ctx context.Context, domain string) ([]*net.MX, error) {
-	// 1. Set a strict timeout.
-	// In a high-perf SaaS, we can't wait 30 seconds for a bad DNS server.
-	// We use a custom Resolver to enforce this timeout.
 	r := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return proxy.DialContext(ctx, network, address, 3*time.Second)
+			// We must use a direct dialer for DNS because
+			// standard SOCKS5 proxies do not support UDP traffic.
+			d := net.Dialer{
+				Timeout: 3 * time.Second,
+			}
+			return d.DialContext(ctx, network, address)
 		},
 	}
 
-	// 2. Perform the Lookup
-	// context.Background() is used here for simplicity in Phase 1,
-	// but we will eventually pass down a request context.
 	mxRecords, err := r.LookupMX(ctx, domain)
 	if err != nil {
-		// If generic error, we check if it's a "No Such Host" error
 		return nil, fmt.Errorf("DNS lookup failed: %w", err)
 	}
 
