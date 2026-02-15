@@ -37,7 +37,7 @@
 
         <div id="resultsCard" class="hidden bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
-                <h3 class="font-semibold text-slate-800">Verification Results</h3>
+                <h3 class="font-semibold text-slate-800">Verification Results <span class="text-xs text-slate-400 font-normal ml-2">(Click row for details)</span></h3>
                 <button onclick="downloadCSV()" class="text-sm text-blue-600 hover:text-blue-800 font-medium">Download CSV</button>
             </div>
             <div class="overflow-x-auto">
@@ -53,6 +53,25 @@
                     <tbody id="resultsTableBody" class="divide-y divide-slate-100">
                         </tbody>
                 </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="detailsModal" class="hidden fixed inset-0 bg-slate-900 bg-opacity-40 backdrop-blur-sm flex items-center justify-center z-50 px-4 transition-opacity">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden">
+            
+            <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-white">
+                <div>
+                    <h3 class="font-bold text-lg text-slate-800">Deep Analysis</h3>
+                    <p id="modalEmailTitle" class="text-sm text-slate-500 font-mono"></p>
+                </div>
+                <button onclick="closeModal()" class="text-slate-400 hover:text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-full p-2 transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+
+            <div class="p-6 overflow-y-auto flex-1 bg-slate-800">
+                <pre id="modalContent" class="text-sm text-green-400 font-mono whitespace-pre-wrap break-words"></pre>
             </div>
         </div>
     </div>
@@ -78,7 +97,6 @@
             formData.append("file", fileInput.files[0]);
 
             try {
-                // Notice we use relative paths (/upload) because the UI is hosted on the same domain
                 const response = await fetch('/upload', { method: 'POST', body: formData });
                 const data = await response.json();
 
@@ -86,11 +104,9 @@
                     currentJobId = data.job_id;
                     document.getElementById('jobIdDisplay').innerText = "ID: " + currentJobId;
                     
-                    // Show Progress UI
                     document.getElementById('progressCard').classList.remove('hidden');
                     document.getElementById('resultsCard').classList.add('hidden');
                     
-                    // Start polling status every 2 seconds
                     pollInterval = setInterval(checkStatus, 2000);
                 } else {
                     alert("Upload failed: " + data.message);
@@ -136,23 +152,25 @@
                 const tbody = document.getElementById('resultsTableBody');
                 tbody.innerHTML = '';
 
-                rawResultsData.forEach(row => {
-                    // Extract data from the JSONB data payload
+                // Notice we added the 'index' parameter here
+                rawResultsData.forEach((row, index) => {
                     const email = row.email;
                     const score = row.score;
                     const status = row.data.status || 'unknown';
                     const provider = row.data.analysis?.mx_provider || 'generic';
 
-                    // Color code the status
                     let statusColor = "text-slate-500 bg-slate-100";
                     if (status === "valid") statusColor = "text-green-700 bg-green-100";
                     if (status === "invalid") statusColor = "text-red-700 bg-red-100";
                     if (status === "catch-all") statusColor = "text-amber-700 bg-amber-100";
 
                     const tr = document.createElement('tr');
-                    tr.className = "hover:bg-slate-50";
+                    // Add hover effects and an onClick listener to the whole row
+                    tr.className = "hover:bg-blue-50 cursor-pointer transition-colors group";
+                    tr.setAttribute("onclick", `showDetails(${index})`);
+                    
                     tr.innerHTML = `
-                        <td class="px-6 py-4 font-medium text-slate-900">${email}</td>
+                        <td class="px-6 py-4 font-medium text-slate-900 group-hover:text-blue-600">${email}</td>
                         <td class="px-6 py-4"><span class="px-2 py-1 rounded-md text-xs font-semibold ${statusColor}">${status}</span></td>
                         <td class="px-6 py-4 font-mono text-slate-600">${score}/100</td>
                         <td class="px-6 py-4 text-slate-500 capitalize">${provider}</td>
@@ -166,10 +184,38 @@
             }
         }
 
+        // --- NEW: Modal Control Functions ---
+        function showDetails(index) {
+            const rowData = rawResultsData[index];
+            if (!rowData) return;
+
+            // Set the modal title to the email address
+            document.getElementById('modalEmailTitle').innerText = rowData.email;
+            
+            // Format the JSON data nicely and inject it
+            // We use 'null, 2' to format it with 2-space indentation
+            const prettyJson = JSON.stringify(rowData.data, null, 2);
+            document.getElementById('modalContent').innerText = prettyJson;
+
+            // Show the modal
+            document.getElementById('detailsModal').classList.remove('hidden');
+        }
+
+        function closeModal() {
+            // Hide the modal
+            document.getElementById('detailsModal').classList.add('hidden');
+        }
+
+        // Close modal if user clicks outside the box
+        document.getElementById('detailsModal').addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeModal();
+            }
+        });
+
         function downloadCSV() {
             if (!rawResultsData || rawResultsData.length === 0) return;
             
-            // Create CSV Headers
             let csvContent = "data:text/csv;charset=utf-8,Email,Score,Status,Provider\n";
             
             rawResultsData.forEach(row => {
@@ -178,7 +224,6 @@
                 csvContent += `${row.email},${row.score},${status},${provider}\n`;
             });
 
-            // Trigger download
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);
