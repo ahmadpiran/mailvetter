@@ -8,6 +8,13 @@
 </head>
 <body class="bg-slate-50 min-h-screen font-sans text-slate-800">
 
+    <div class="flex justify-end mb-4">
+        <div class="flex items-center gap-2 bg-white px-3 py-2 rounded-lg border border-slate-200 shadow-sm">
+            <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+            <input type="password" id="apiKeyInput" onchange="saveApiKey()" placeholder="Enter Master API Key..." class="text-sm border-none focus:ring-0 outline-none text-slate-600 w-48 placeholder-slate-300">
+        </div>
+    </div>
+    
     <div class="max-w-4xl mx-auto py-12 px-4">
         <div class="text-center mb-10">
             <h1 class="text-3xl font-bold text-slate-900">Mailvetter Bulk Engine</h1>
@@ -81,6 +88,20 @@
         let pollInterval = null;
         let rawResultsData = [];
 
+        // Load the saved key on page load
+        document.getElementById('apiKeyInput').value = localStorage.getItem('mv_api_key') || '';
+
+        function saveApiKey() {
+            localStorage.setItem('mv_api_key', document.getElementById('apiKeyInput').value);
+        }
+
+        // Helper to attach the Authorization header
+        function getAuthHeaders() {
+            return {
+                'Authorization': 'Bearer ' + document.getElementById('apiKeyInput').value
+            };
+        }
+
         async function uploadCSV() {
             const fileInput = document.getElementById('csvFile');
             const btn = document.getElementById('uploadBtn');
@@ -97,7 +118,16 @@
             formData.append("file", fileInput.files[0]);
 
             try {
-                const response = await fetch('/upload', { method: 'POST', body: formData });
+                const response = await fetch('/upload', { 
+                    method: 'POST', 
+                    body: formData,
+                    headers: getAuthHeaders() // Inject API Key
+                });
+                
+                if (response.status === 401) {
+                    throw new Error("Unauthorized! Check your API Key.");
+                }
+
                 const data = await response.json();
 
                 if (data.job_id) {
@@ -112,8 +142,7 @@
                     alert("Upload failed: " + data.message);
                 }
             } catch (err) {
-                alert("Error connecting to server.");
-                console.error(err);
+                alert(err.message || "Error connecting to server.");
             } finally {
                 btn.disabled = false;
                 btn.innerText = "Start Job";
@@ -124,7 +153,16 @@
             if (!currentJobId) return;
 
             try {
-                const response = await fetch(`/status?id=${currentJobId}`);
+                const response = await fetch(`/status?id=${currentJobId}`, {
+                    headers: getAuthHeaders() // Inject API Key
+                });
+                
+                if (response.status === 401) {
+                    clearInterval(pollInterval);
+                    alert("Unauthorized! Check your API Key.");
+                    return;
+                }
+
                 const data = await response.json();
 
                 const percent = Math.round((data.processed_count / data.total_count) * 100);
@@ -146,13 +184,14 @@
 
         async function fetchResults() {
             try {
-                const response = await fetch(`/results?id=${currentJobId}`);
+                const response = await fetch(`/results?id=${currentJobId}`, {
+                    headers: getAuthHeaders() // Inject API Key
+                });
                 rawResultsData = await response.json();
                 
                 const tbody = document.getElementById('resultsTableBody');
                 tbody.innerHTML = '';
 
-                // Notice we added the 'index' parameter here
                 rawResultsData.forEach((row, index) => {
                     const email = row.email;
                     const score = row.score;
@@ -165,7 +204,6 @@
                     if (status === "catch-all") statusColor = "text-amber-700 bg-amber-100";
 
                     const tr = document.createElement('tr');
-                    // Add hover effects and an onClick listener to the whole row
                     tr.className = "hover:bg-blue-50 cursor-pointer transition-colors group";
                     tr.setAttribute("onclick", `showDetails(${index})`);
                     
@@ -184,46 +222,31 @@
             }
         }
 
-        // --- NEW: Modal Control Functions ---
+        // Modal Functions
         function showDetails(index) {
             const rowData = rawResultsData[index];
             if (!rowData) return;
-
-            // Set the modal title to the email address
             document.getElementById('modalEmailTitle').innerText = rowData.email;
-            
-            // Format the JSON data nicely and inject it
-            // We use 'null, 2' to format it with 2-space indentation
-            const prettyJson = JSON.stringify(rowData.data, null, 2);
-            document.getElementById('modalContent').innerText = prettyJson;
-
-            // Show the modal
+            document.getElementById('modalContent').innerText = JSON.stringify(rowData.data, null, 2);
             document.getElementById('detailsModal').classList.remove('hidden');
         }
 
         function closeModal() {
-            // Hide the modal
             document.getElementById('detailsModal').classList.add('hidden');
         }
 
-        // Close modal if user clicks outside the box
         document.getElementById('detailsModal').addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeModal();
-            }
+            if (e.target === this) closeModal();
         });
 
         function downloadCSV() {
             if (!rawResultsData || rawResultsData.length === 0) return;
-            
             let csvContent = "data:text/csv;charset=utf-8,Email,Score,Status,Provider\n";
-            
             rawResultsData.forEach(row => {
                 const status = row.data.status || 'unknown';
                 const provider = row.data.analysis?.mx_provider || 'generic';
                 csvContent += `${row.email},${row.score},${status},${provider}\n`;
             });
-
             const encodedUri = encodeURI(csvContent);
             const link = document.createElement("a");
             link.setAttribute("href", encodedUri);

@@ -53,11 +53,12 @@ func main() {
 	}
 
 	// 4. Define Handlers
-	http.HandleFunc("/verify", enableCORS(verifyHandler))
-	http.HandleFunc("/upload", enableCORS(uploadHandler))
-	http.HandleFunc("/status", enableCORS(statusHandler))
-	http.HandleFunc("/results", enableCORS(resultsHandler))
+	http.HandleFunc("/verify", enableCORS(requireAPIKey(verifyHandler)))
+	http.HandleFunc("/upload", enableCORS(requireAPIKey(uploadHandler)))
+	http.HandleFunc("/status", enableCORS(requireAPIKey(statusHandler)))
+	http.HandleFunc("/results", enableCORS(requireAPIKey(resultsHandler)))
 	http.HandleFunc("/info", enableCORS(infoHandler))
+
 	// --- Serve the UI ---
 	// Serve everything inside the /static directory at the root path "/"
 	fs := http.FileServer(http.Dir("./static"))

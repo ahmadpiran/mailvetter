@@ -10,6 +10,7 @@ services:
       - REDIS_ADDR=redis:6379
       - DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db?pool_max_conns=100
       - PROXY_LIST=${PROXY_LIST}
+      - API_SECRET_KEY=${API_SECRET_KEY}
     depends_on:
       - redis
       - postgres
