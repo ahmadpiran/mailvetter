@@ -31,6 +31,9 @@ WORKDIR /home/appuser/
 COPY --from=builder /app/api-server .
 COPY --from=builder /app/worker-process .
 
+# --- Copy the UI folder ---
+COPY --from=builder /app/static ./static
+
 RUN chown appuser:appgroup ./
 
 USER appuser

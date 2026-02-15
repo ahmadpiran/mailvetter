@@ -58,7 +58,11 @@ func main() {
 	http.HandleFunc("/status", enableCORS(statusHandler))
 	http.HandleFunc("/results", enableCORS(resultsHandler))
 	http.HandleFunc("/info", enableCORS(infoHandler))
-	http.HandleFunc("/", homeHandler)
+	// --- Serve the UI ---
+	// Serve everything inside the /static directory at the root path "/"
+	fs := http.FileServer(http.Dir("./static"))
+
+	http.Handle("/", fs)
 
 	// 5. Server Configuration
 	server := &http.Server{
