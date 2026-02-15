@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"mailvetter/internal/proxy"
@@ -47,5 +48,12 @@ func main() {
 	}
 
 	// 4. Start the Processing Loop
-	worker.Start()
+	concurrencyStr := os.Getenv("WORKER_CONCURRENCY")
+	concurrency := 20 // Default to 20 parallel workers
+
+	if c, err := strconv.Atoi(concurrencyStr); err == nil && c > 0 {
+		concurrency = c
+	}
+
+	worker.Start(concurrency)
 }
