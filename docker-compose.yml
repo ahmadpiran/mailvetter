@@ -8,9 +8,8 @@ services:
       - PORT=8080
       - HIBP_API_KEY=${HIBP_API_KEY}
       - REDIS_ADDR=redis:6379
-      - DB_URL=${DB_URL}
+      - DB_URL=DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db?pool_max_conns=100
       - PROXY_LIST=${PROXY_LIST}
-      - WORKER_CONCURRENCY=50
     depends_on:
       - redis
       - postgres
@@ -27,8 +26,9 @@ services:
     environment:
       - HIBP_API_KEY=${HIBP_API_KEY}
       - REDIS_ADDR=redis:6379
-      - DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db
+      - DB_URL=DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db?pool_max_conns=100
       - PROXY_LIST=${PROXY_LIST}
+      - WORKER_CONCURRENCY=50
     networks:
       - mv-net
     depends_on:
