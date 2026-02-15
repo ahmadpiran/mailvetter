@@ -42,51 +42,55 @@ func Start(concurrency int) {
 					continue
 				}
 
-				// 3. PROCESS
-				valCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-				parts, _ := validator.VerifyEmail(valCtx, task.Email, extractDomain(task.Email))
-				cancel()
+				func() {
+					// 3. PROCESS
+					valCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+					defer cancel() // Safe to defer here now!
 
-				// 4. SAVE to PostgreSQL
-				resultJSON, _ := json.Marshal(parts)
+					parts, _ := validator.VerifyEmail(valCtx, task.Email, extractDomain(task.Email))
 
-				tx, err := store.DB.Begin(ctx)
-				if err != nil {
-					log.Printf("[Worker %d] DB Transaction error: %v\n", workerID, err)
-					continue
-				}
+					// 4. SAVE to PostgreSQL
+					resultJSON, _ := json.Marshal(parts)
 
-				_, err = tx.Exec(ctx, `
-					INSERT INTO results (job_id, email, score, data)
-					VALUES ($1, $2, $3, $4)
-				`, task.JobID, task.Email, parts.Score, resultJSON)
+					tx, err := store.DB.Begin(ctx)
+					if err != nil {
+						log.Printf("[Worker %d] DB Transaction error: %v\n", workerID, err)
+						return // Returns from the closure, allowing the loop to continue
+					}
 
-				if err != nil {
-					log.Printf("[Worker %d] Failed to save result: %v\n", workerID, err)
-					tx.Rollback(ctx)
-					continue
-				}
+					// GUARANTEE ROLLBACK ON FAILURE OR PANIC (Executes when the closure ends)
+					defer tx.Rollback(ctx)
 
-				// Increment progress
-				_, err = tx.Exec(ctx, `
-					UPDATE jobs 
-					SET processed_count = processed_count + 1,
-					    status = CASE WHEN processed_count + 1 >= total_count THEN 'completed' ELSE status END,
-						completed_at = CASE WHEN processed_count + 1 >= total_count THEN NOW() ELSE completed_at END
-					WHERE id = $1
-				`, task.JobID)
+					_, err = tx.Exec(ctx, `
+						INSERT INTO results (job_id, email, score, data)
+						VALUES ($1, $2, $3, $4)
+					`, task.JobID, task.Email, parts.Score, resultJSON)
 
-				if err != nil {
-					log.Printf("[Worker %d] Failed to update job: %v\n", workerID, err)
-					tx.Rollback(ctx)
-					continue
-				}
+					if err != nil {
+						log.Printf("[Worker %d] Failed to save result: %v\n", workerID, err)
+						return
+					}
 
-				if err := tx.Commit(ctx); err != nil {
-					log.Printf("[Worker %d] Failed to commit: %v\n", workerID, err)
-				} else {
-					fmt.Printf("[Worker %d] ✅ Processed: %s (Score: %d)\n", workerID, task.Email, parts.Score)
-				}
+					// Increment progress
+					_, err = tx.Exec(ctx, `
+						UPDATE jobs 
+						SET processed_count = processed_count + 1,
+						    status = CASE WHEN processed_count + 1 >= total_count THEN 'completed' ELSE status END,
+							completed_at = CASE WHEN processed_count + 1 >= total_count THEN NOW() ELSE completed_at END
+						WHERE id = $1
+					`, task.JobID)
+
+					if err != nil {
+						log.Printf("[Worker %d] Failed to update job: %v\n", workerID, err)
+						return
+					}
+
+					if err := tx.Commit(ctx); err != nil {
+						log.Printf("[Worker %d] Failed to commit: %v\n", workerID, err)
+					} else {
+						fmt.Printf("[Worker %d] ✅ Processed: %s (Score: %d)\n", workerID, task.Email, parts.Score)
+					}
+				}()
 			}
 		}(i)
 	}

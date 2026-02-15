@@ -179,52 +179,83 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		mu.Unlock()
 	}()
 
-	// --- Collector C: Probes & History (No Caching - User Specific) ---
+	// --- Collector C: Probes & History (Fully Concurrent) ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		log.Printf("[DEBUG] Collector C (Probes) STARTED for %s", email)
 		defer log.Printf("[DEBUG] Collector C (Probes) DONE for %s", email)
 
-		var hasGCal, hasTeams, hasSharePoint, hasAdobe, hasGravatar, hasGitHub bool
-		var breachCount int
+		var probeWg sync.WaitGroup
 
-		if lookup.CheckGoogleCalendar(ctx, email) {
-			hasGCal = true
-		}
+		probeWg.Add(1)
+		go func() {
+			defer probeWg.Done()
+			res := lookup.CheckGoogleCalendar(ctx, email)
+			mu.Lock()
+			analysis.HasGoogleCalendar = res
+			mu.Unlock()
+		}()
 
-		if lookup.CheckTeamsPresence(ctx, email, domain) {
-			hasTeams = true
-		}
-		if lookup.CheckSharePoint(ctx, email) {
-			hasSharePoint = true
-		}
+		probeWg.Add(1)
+		go func() {
+			defer probeWg.Done()
+			res := lookup.CheckTeamsPresence(ctx, email, domain)
+			mu.Lock()
+			analysis.HasTeamsPresence = res
+			mu.Unlock()
+		}()
 
-		if lookup.CheckAdobe(ctx, email) {
-			hasAdobe = true
-		}
+		probeWg.Add(1)
+		go func() {
+			defer probeWg.Done()
+			res := lookup.CheckSharePoint(ctx, email)
+			mu.Lock()
+			analysis.HasSharePoint = res
+			mu.Unlock()
+		}()
 
-		if lookup.CheckGravatar(ctx, email) {
-			hasGravatar = true
-		}
-		if lookup.CheckGitHub(ctx, email) {
-			hasGitHub = true
-		}
+		probeWg.Add(1)
+		go func() {
+			defer probeWg.Done()
+			res := lookup.CheckAdobe(ctx, email)
+			mu.Lock()
+			analysis.HasAdobe = res
+			mu.Unlock()
+		}()
+
+		probeWg.Add(1)
+		go func() {
+			defer probeWg.Done()
+			res := lookup.CheckGravatar(ctx, email)
+			mu.Lock()
+			analysis.HasGravatar = res
+			mu.Unlock()
+		}()
+
+		probeWg.Add(1)
+		go func() {
+			defer probeWg.Done()
+			res := lookup.CheckGitHub(ctx, email)
+			mu.Lock()
+			analysis.HasGitHub = res
+			mu.Unlock()
+		}()
 
 		apiKey := os.Getenv("HIBP_API_KEY")
 		if apiKey != "" {
-			breachCount = lookup.CheckHIBP(ctx, email, apiKey)
+			probeWg.Add(1)
+			go func() {
+				defer probeWg.Done()
+				res := lookup.CheckHIBP(ctx, email, apiKey)
+				mu.Lock()
+				analysis.BreachCount = res
+				mu.Unlock()
+			}()
 		}
 
-		mu.Lock()
-		analysis.HasGoogleCalendar = hasGCal
-		analysis.HasTeamsPresence = hasTeams
-		analysis.HasSharePoint = hasSharePoint
-		analysis.HasAdobe = hasAdobe
-		analysis.HasGravatar = hasGravatar
-		analysis.HasGitHub = hasGitHub
-		analysis.BreachCount = breachCount
-		mu.Unlock()
+		// Wait for all sub-probes to finish
+		probeWg.Wait()
 	}()
 
 	wg.Wait()

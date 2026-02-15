@@ -43,6 +43,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// 3. Read CSV
 	reader := csv.NewReader(file)
 	var emails []string
+	isFirstRow := true
 
 	for {
 		record, err := reader.Read()
@@ -53,14 +54,20 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid CSV format", http.StatusBadRequest)
 			return
 		}
-		if len(record) > 0 && record[0] != "" {
-			emails = append(emails, record[0])
-		}
-	}
 
-	if len(emails) == 0 {
-		http.Error(w, "CSV is empty", http.StatusBadRequest)
-		return
+		if len(record) > 0 {
+			val := record[0]
+			// Skip the row if it's the first row and looks like a header
+			if isFirstRow && (val == "email" || val == "Email" || val == "Email Address") {
+				isFirstRow = false
+				continue
+			}
+			isFirstRow = false
+
+			if val != "" {
+				emails = append(emails, val)
+			}
+		}
 	}
 
 	// 4. Create Job in Postgres

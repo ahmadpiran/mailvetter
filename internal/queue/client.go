@@ -44,21 +44,29 @@ func EnqueueBatch(ctx context.Context, jobID string, emails []string) error {
 		return nil
 	}
 
-	// 1. Convert emails to JSON tasks
-	var values []interface{}
-	for _, email := range emails {
-		task := Task{JobID: jobID, Email: email}
-		data, err := json.Marshal(task)
-		if err != nil {
-			return err
-		}
-		values = append(values, data)
-	}
+	const batchSize = 5000 // Safe limit for Redis RPush
 
-	// 2. Push to Redis (RPUSH appends to the tail of the list)
-	// We use a pipeline (implicit in go-redis for variadic args) to send all at once.
-	if err := Client.RPush(ctx, QueueName, values...).Err(); err != nil {
-		return fmt.Errorf("failed to enqueue tasks: %w", err)
+	for i := 0; i < len(emails); i += batchSize {
+		end := i + batchSize
+		if end > len(emails) {
+			end = len(emails)
+		}
+
+		// 1. Convert emails to JSON tasks
+		var values []interface{}
+		for _, email := range emails[i:end] {
+			task := Task{JobID: jobID, Email: email}
+			data, err := json.Marshal(task)
+			if err != nil {
+				return err
+			}
+			values = append(values, data)
+		}
+
+		// 2. Push to Redis
+		if err := Client.RPush(ctx, QueueName, values...).Err(); err != nil {
+			return fmt.Errorf("failed to enqueue batch: %w", err)
+		}
 	}
 
 	return nil

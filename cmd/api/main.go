@@ -145,12 +145,3 @@ func infoHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(guide)
 }
-
-func homeHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(`<h1>Mailvetter Engine v3.0</h1><p>Active. Query /verify?email=...</p>`))
-}
