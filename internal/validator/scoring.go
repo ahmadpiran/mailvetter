@@ -161,8 +161,8 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	// 5. CATCH-ALL DISAMBIGUATION
 	if analysis.IsCatchAll && analysis.MxProvider != "office365" {
 
-		hasStrongProof := analysis.HasGoogleCalendar || analysis.HasSharePoint || analysis.BreachCount > 0 || analysis.TimingDeltaMs > 1500
-		hasSoftProof := analysis.HasGitHub || analysis.HasAdobe || analysis.HasTeamsPresence || analysis.HasGravatar || analysis.TimingDeltaMs > 800
+		hasStrongProof := analysis.HasGoogleCalendar || analysis.HasSharePoint || analysis.BreachCount > 0 || analysis.TimingDeltaMs > 3000
+		hasSoftProof := analysis.HasGitHub || analysis.HasAdobe || analysis.HasTeamsPresence || analysis.HasGravatar || analysis.TimingDeltaMs > 1500
 
 		if hasStrongProof {
 			boost := 50.0

@@ -158,7 +158,21 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		// and to confirm the server is reachable right now.
 		status, delta, isCatchAll := runSmtpProbes(ctx, email, domain, primaryMX)
 
-		if isCatchAll && delta > 100 && delta < 400 {
+		if isCatchAll && delta > 1500 {
+			// 🛑 ANTI-JITTER SAFETY RAIL: Massive delta detected.
+			// We must double-check to ensure this wasn't a slow proxy connection.
+			time.Sleep(1 * time.Second)
+			status2, delta2, _ := runSmtpProbes(ctx, email, domain, primaryMX)
+
+			// We take the MINIMUM delta. If the first was 11s (proxy lag) and the
+			// second is 0.2s, the server is NOT tarpitting, it was just our proxy.
+			if delta2 < delta {
+				delta = delta2
+			}
+			status = status2
+
+		} else if isCatchAll && delta > 100 && delta < 400 {
+			// Existing small jitter smoother for micro-deltas
 			time.Sleep(250 * time.Millisecond)
 			status2, delta2, _ := runSmtpProbes(ctx, email, domain, primaryMX)
 			delta = (delta + delta2) / 2
