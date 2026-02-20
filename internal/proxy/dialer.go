@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	netproxy "golang.org/x/net/proxy"
@@ -13,14 +15,13 @@ import (
 // when the SMTP client closes the connection.
 type proxyConn struct {
 	net.Conn
-	released bool
+	releaseOnce sync.Once // Ensures we never accidentally release a token twice
 }
 
 func (pc *proxyConn) Close() error {
-	if !pc.released {
+	pc.releaseOnce.Do(func() {
 		<-Semaphore // Give the slot back to the global pool
-		pc.released = true
-	}
+	})
 	return pc.Conn.Close()
 }
 
@@ -36,14 +37,18 @@ func DialContext(ctx context.Context, network, addr string, timeout time.Duratio
 		return directDialer.DialContext(ctx, network, addr)
 	}
 
-	Semaphore <- struct{}{}
+	// Respect the Context Timeout while waiting in line
+	select {
+	case Semaphore <- struct{}{}:
+		// Successfully grabbed a proxy slot! Proceed.
+	case <-ctx.Done():
+		// The worker timeout hit before we could get a proxy slot
+		return nil, fmt.Errorf("timeout waiting for proxy slot: %w", ctx.Err())
+	}
 
 	// Force Local DNS Resolution
-	// By default, Go sends the hostname to the proxy server. If the proxy
-	// does not support DNS, it fails. We resolve it to an IP locally first.
 	host, port, err := net.SplitHostPort(addr)
 	if err == nil {
-		// Only look up if it's not already an IP address
 		if net.ParseIP(host) == nil {
 			ips, lookupErr := net.LookupIP(host)
 			if lookupErr == nil && len(ips) > 0 {
@@ -86,6 +91,6 @@ func DialContext(ctx context.Context, network, addr string, timeout time.Duratio
 
 	log.Printf("[DEBUG-PROXY] SUCCESS connected to %s. Took %v", addr, time.Since(start))
 
-	// SUCCESS! Return the wrapped connection so the Semaphore releases on Close()
-	return &proxyConn{Conn: conn, released: false}, nil
+	// SUCCESS! Return the wrapped connection
+	return &proxyConn{Conn: conn}, nil
 }
