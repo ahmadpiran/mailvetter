@@ -324,7 +324,6 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 			ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail)
 		}()
 
-		// Context-Aware WaitGroup for SMTP network calls
 		c := make(chan struct{})
 		go func() {
 			defer close(c)
@@ -333,7 +332,6 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 
 		select {
 		case <-c:
-			// Normal completion
 		case <-ctx.Done():
 			return 0, 0, false
 		}
@@ -341,17 +339,15 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 		targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
 		ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
 
-		if !targetTransient && !ghostTransient {
+		// FIX 3: If target succeeded, don't abort just because the ghost got rate-limited
+		if !targetTransient && (!ghostTransient || targetValid) {
 			break
 		}
 
 		if attempt == 1 {
 			log.Printf("[DEBUG] Transient error via proxy for %s, retrying...", email)
-			// Context-aware sleep. If the timeout fires during the 2-second pause
-			// we abort instantly rather than burning the remaining deadline.
 			select {
 			case <-time.After(2 * time.Second):
-				// Sleep finished, proceed to attempt 2
 			case <-ctx.Done():
 				return 0, 0, false
 			}
@@ -367,7 +363,8 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
 	ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
 
-	if targetTransient || ghostTransient {
+	// FIX 4: Only fail completely if the TARGET is the one that timed out.
+	if targetTransient {
 		return 0, 0, false
 	}
 
@@ -376,13 +373,18 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 
 	ghostHardBounced := !ghostValid && lookup.IsNoSuchUserError(ghostErr)
 
-	if ghostHardBounced && targetValid {
-		status = 250
-	} else if !targetValid && lookup.IsNoSuchUserError(targetErr) {
+	if targetValid {
+		if ghostHardBounced {
+			status = 250 // Target OK, Ghost Dead = Confirmed Valid
+		} else if ghostValid {
+			status = 0
+			isCatchAll = true // Target OK, Ghost OK = Catch-All
+		} else if ghostTransient {
+			// FIX 5: Target OK, but Ghost dropped the connection. Optimistically assume valid.
+			status = 250
+		}
+	} else if lookup.IsNoSuchUserError(targetErr) {
 		status = 550
-	} else if targetValid {
-		status = 0
-		isCatchAll = true
 	}
 
 	return status, delta, isCatchAll

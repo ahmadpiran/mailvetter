@@ -14,7 +14,7 @@ import (
 
 const (
 	HeloHost = "mta1.mailvetter.com" // Identify yourself politely
-	MailFrom = "ayan@mailvetter.com"
+	MailFrom = ""
 )
 
 // Prevents the VPS IP from being banned by Google/Outlook for opening too many concurrent connections.
@@ -167,33 +167,51 @@ func IsNoSuchUserError(err error) bool {
 		return false
 	}
 
-	// Check for a structured textproto.Error first.
-	// Previously the code matched on raw substring "550", which could produce false
-	// positives if a domain name, port, or wrapped error message happened to contain
-	// those digits. Structured errors are always preferred when available.
-	var textErr *textproto.Error
-	if errors.As(err, &textErr) {
-		return textErr.Code == 550 || textErr.Code == 551
-	}
-
-	// Fall through to string matching only as a last resort for non-textproto errors.
 	errStr := strings.ToLower(err.Error())
 
-	if strings.Contains(errStr, "5.1.1") {
+	// 1. SHIELD: Check for block/spam/policy keywords FIRST
+	// If the server explicitly says "blocked", it is a network error, NOT a missing user.
+	blockKeywords := []string{
+		"spam", "block", "banned", "blacklisted", "ip", "policy",
+		"relay", "access denied", "rejected by network", "unauthenticated",
+		"sender", "reputation", "spf", "dmarc", "dkim", "quota",
+		"rate limit", "temporarily", "reverse dns", "ptr", "helo",
+		"spamhaus", "barracuda", "sorbs", "client host rejected",
+		"not permitted", "connection refused", "timeout", "greylist",
+	}
+	for _, kw := range blockKeywords {
+		if strings.Contains(errStr, kw) {
+			return false
+		}
+	}
+
+	// 2. Specific status codes explicitly indicating invalid user
+	if strings.Contains(errStr, "5.1.1") || strings.Contains(errStr, "5.1.0") {
 		return true
 	}
 
+	// 3. Keywords explicitly indicating missing user
 	keywords := []string{
 		"does not exist", "user unknown", "no such user",
 		"recipient rejected", "not found", "invalid mailbox",
-		"not a valid mailbox",
+		"not a valid mailbox", "mailbox unavailable", "unrouteable address",
+		"no mailbox here", "unknown user", "bad destination",
+		"address rejected",
 	}
-
 	for _, kw := range keywords {
 		if strings.Contains(errStr, kw) {
 			return true
 		}
 	}
+
+	// 4. Fallback: If we didn't hit a blocklist word, and we see standard 550/551
+	var textErr *textproto.Error
+	if errors.As(err, &textErr) {
+		if textErr.Code == 550 || textErr.Code == 551 {
+			return true
+		}
+	}
+
 	return false
 }
 
