@@ -10,7 +10,9 @@ func TestRoundRobin(t *testing.T) {
 		"http://1.1.1.1:8000",
 		"http://2.2.2.2:8000",
 	}
-	if err := Init(list); err != nil {
+
+	// Pass 0 for dynamic limit, and false for SMTP proxying
+	if err := Init(list, 0, false); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 

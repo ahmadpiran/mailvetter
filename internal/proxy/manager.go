@@ -6,17 +6,17 @@ import (
 	"sync/atomic"
 )
 
-// Manager holds the pool of proxies
 type Manager struct {
 	proxies []*url.URL
 	counter uint64
 }
 
-// Global instance
 var Global *Manager
+var Semaphore chan struct{}
+var SMTPEnabled bool
 
-// Init loads the proxies from a list of strings (e.g., "http://user:pass@ip:port")
-func Init(proxyList []string) error {
+// Init loads the proxies and sets the dynamic concurrency limit and SMTP toggle
+func Init(proxyList []string, limit int, enableSMTP bool) error {
 	var parsed []*url.URL
 
 	for _, p := range proxyList {
@@ -30,6 +30,18 @@ func Init(proxyList []string) error {
 		parsed = append(parsed, u)
 	}
 
+	// Dynamic Logic: If no limit is provided, default to the number of proxies
+	if limit <= 0 {
+		limit = len(parsed)
+		if limit == 0 {
+			limit = 10 // Failsafe
+		}
+	}
+
+	// Initialize the dynamic traffic light
+	Semaphore = make(chan struct{}, limit)
+	SMTPEnabled = enableSMTP
+
 	Global = &Manager{
 		proxies: parsed,
 		counter: 0,
@@ -37,19 +49,14 @@ func Init(proxyList []string) error {
 	return nil
 }
 
-// Next returns the next proxy in the rotation.
-// It returns nil if no proxies are configured (direct connection).
 func (m *Manager) Next() *url.URL {
 	if m == nil || len(m.proxies) == 0 {
 		return nil
 	}
-
-	// Atomic increment ensures thread-safety across concurrent workers
 	n := atomic.AddUint64(&m.counter, 1)
 	return m.proxies[(n-1)%uint64(len(m.proxies))]
 }
 
-// Enabled checks if proxying is active
 func Enabled() bool {
 	return Global != nil && len(Global.proxies) > 0
 }

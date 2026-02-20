@@ -22,7 +22,7 @@ func CheckHIBP(ctx context.Context, email, apiKey string) int {
 	req.Header.Set("hibp-api-key", apiKey)
 	req.Header.Set("User-Agent", "Mailvetter-Verifier")
 
-	resp, err := sharedClient.Do(req)
+	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return 0
 	}

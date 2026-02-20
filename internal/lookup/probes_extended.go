@@ -27,7 +27,7 @@ func CheckAdobe(ctx context.Context, email string) bool {
 	req.Header.Set("X-IMS-ClientId", "AdobeID_v2_1") // Public Client ID
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := sharedClient.Do(req)
+	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
 	}
@@ -55,7 +55,7 @@ func CheckDomainAge(ctx context.Context, domain string) int {
 	req.Header.Set("Accept", "application/rdap+json")
 
 	// Use the shared client (handles redirects automatically)
-	resp, err := sharedClient.Do(req)
+	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return 0
 	}

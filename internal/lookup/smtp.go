@@ -3,6 +3,7 @@ package lookup
 import (
 	"context"
 	"fmt"
+	"mailvetter/internal/proxy"
 	"net"
 	"net/smtp"
 	"net/textproto"
@@ -15,13 +16,21 @@ const (
 	MailFrom = "verify@mailvetter.com"
 )
 
-// CheckSMTP performs a standard probe via direct connection.
+// CheckSMTP performs a standard probe via direct or proxy connection.
 func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, time.Duration, error) {
 	start := time.Now()
 
-	// 1. Direct connection (Bypass proxy for Port 25)
-	d := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", mxHost+":25")
+	var conn net.Conn
+	var err error
+
+	// 1. Dynamic Routing: Use SOCKS5 Proxy OR Direct VPS Connection
+	if proxy.SMTPEnabled {
+		conn, err = proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
+	} else {
+		d := net.Dialer{Timeout: 10 * time.Second}
+		conn, err = d.DialContext(ctx, "tcp", mxHost+":25")
+	}
+
 	if err != nil {
 		return false, 0, fmt.Errorf("connection failed: %w", err)
 	}
@@ -57,7 +66,6 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 
 // CheckPostmaster verifies if the domain accepts emails to postmaster
 func CheckPostmaster(ctx context.Context, mxHost, domain string) bool {
-	// A standard compliant mail server MUST accept mail to postmaster.
 	success, _, err := CheckSMTP(ctx, mxHost, "postmaster@"+domain)
 	if success {
 		return true
@@ -65,20 +73,27 @@ func CheckPostmaster(ctx context.Context, mxHost, domain string) bool {
 	if IsNoSuchUserError(err) {
 		return false
 	}
-	// If rate-limited or timed out, assume true to avoid penalizing the user's score unfairly
 	return true
 }
 
 // CheckVRFY attempts to verify the user using the VRFY command.
 func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
-	d := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", mxHost+":25")
+	var conn net.Conn
+	var err error
+
+	// Dynamic Routing
+	if proxy.SMTPEnabled {
+		conn, err = proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
+	} else {
+		d := net.Dialer{Timeout: 10 * time.Second}
+		conn, err = d.DialContext(ctx, "tcp", mxHost+":25")
+	}
+
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
 
-	// Anti-tarpit deadline
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	tp := textproto.NewConn(conn)

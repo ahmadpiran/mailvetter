@@ -39,10 +39,24 @@ func main() {
 	proxyListRaw := os.Getenv("PROXY_LIST")
 	if proxyListRaw != "" {
 		proxies := strings.Split(proxyListRaw, ",")
-		if err := proxy.Init(proxies); err != nil {
+
+		proxyLimitStr := os.Getenv("PROXY_CONCURRENCY")
+		proxyLimit, _ := strconv.Atoi(proxyLimitStr)
+
+		// Read the SMTP toggle
+		smtpProxyStr := strings.ToLower(os.Getenv("SMTP_PROXY_ENABLED"))
+		smtpProxyEnabled := smtpProxyStr == "true" || smtpProxyStr == "1"
+
+		if err := proxy.Init(proxies, proxyLimit, smtpProxyEnabled); err != nil {
 			log.Fatalf("❌ Failed to initialize proxy manager: %v", err)
 		}
-		log.Printf("🛡️  Proxy rotation enabled (%d proxies loaded)\n", len(proxies))
+
+		log.Printf("🛡️  Proxy rotation enabled (%d proxies loaded, max %d concurrent HTTP)", len(proxies), cap(proxy.Semaphore))
+		if smtpProxyEnabled {
+			log.Println("⚠️  SMTP Proxying is ENABLED (Port 25 traffic will route through proxies)")
+		} else {
+			log.Println("✅ SMTP Proxying is DISABLED (Hybrid Mode: Port 25 traffic routes direct from VPS)")
+		}
 	} else {
 		log.Println("⚠️  No proxies configured. Running with direct connections.")
 	}

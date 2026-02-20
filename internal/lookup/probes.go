@@ -16,16 +16,14 @@ import (
 	"mailvetter/internal/proxy"
 )
 
-// sharedClient dynamically routes traffic through proxies if they are enabled
 var sharedClient = &http.Client{
 	Timeout: 15 * time.Second,
 	Transport: &http.Transport{
-		// This function runs on EVERY request
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			if proxy.Enabled() {
 				return proxy.Global.Next(), nil
 			}
-			return nil, nil // Fallback to direct connection if no proxies
+			return nil, nil
 		},
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
@@ -40,6 +38,17 @@ var userAgents = []string{
 
 func getRandomUserAgent() string {
 	return userAgents[rand.Intn(len(userAgents))]
+}
+
+// --- Semaphore ---
+// This strict-limits our HTTP concurrency to perfectly match your proxy plan.
+
+func DoProxiedRequest(req *http.Request) (*http.Response, error) {
+	if proxy.Enabled() {
+		proxy.Semaphore <- struct{}{}        // Wait in line
+		defer func() { <-proxy.Semaphore }() // Give the slot back
+	}
+	return sharedClient.Do(req)
 }
 
 // --- INFRASTRUCTURE ---
@@ -88,7 +97,8 @@ func CheckGoogleCalendar(ctx context.Context, email string) bool {
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := sharedClient.Do(req)
+	// UPDATED: Use the Semaphore wrapper
+	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
 	}
@@ -113,7 +123,8 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := sharedClient.Do(req)
+	// UPDATED: Use the Semaphore wrapper
+	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
 	}
@@ -123,7 +134,6 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 
 // --- SOCIAL PROBES ---
 
-// CheckGravatar checks for a profile image.
 func CheckGravatar(ctx context.Context, email string) bool {
 	cleanEmail := strings.TrimSpace(strings.ToLower(email))
 	hash := md5.Sum([]byte(cleanEmail))
@@ -136,7 +146,8 @@ func CheckGravatar(ctx context.Context, email string) bool {
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := sharedClient.Do(req)
+	// UPDATED: Use the Semaphore wrapper
+	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
 	}
@@ -144,18 +155,7 @@ func CheckGravatar(ctx context.Context, email string) bool {
 	return resp.StatusCode == 200
 }
 
-// CheckGitHub checks if the email is associated with a GitHub user.
-// Note: This hits the unauthenticated API search, which has rate limits.
-// For production, use a token: req.Header.Set("Authorization", "token ...")
 func CheckGitHub(ctx context.Context, email string) bool {
-	// GitHub Search API: q=email:user@domain.com type:user
-	// Note: Email search often requires auth.
-	// Fallback Strategy: Check if the user part matches a username? No, that's inaccurate.
-	// Accurate Strategy: Commit Search.
-
-	// Since unauthenticated email search is restricted, we'll try a commit patch lookup technique
-	// or simply use the search endpoint and handle the 422/403 gracefully.
-
 	url := fmt.Sprintf("https://api.github.com/search/users?q=%s+in:email", email)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -163,7 +163,8 @@ func CheckGitHub(ctx context.Context, email string) bool {
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := sharedClient.Do(req)
+	// UPDATED: Use the Semaphore wrapper
+	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
 	}
@@ -197,7 +198,8 @@ func CheckMicrosoftLogin(ctx context.Context, email string) bool {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := sharedClient.Do(req)
+	// UPDATED: Use the Semaphore wrapper
+	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
 	}
