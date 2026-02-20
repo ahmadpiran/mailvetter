@@ -8,40 +8,68 @@ import (
 	"time"
 )
 
-// MXRecord holds the simplified result of an MX lookup
+// MXRecord holds the simplified result of an MX lookup.
+// Using a value type rather than *net.MX avoids mutating structs that
+// Go's internal resolver may have cached.
 type MXRecord struct {
 	Host string
 	Pref uint16
 }
 
 // CheckDNS performs the initial domain validation and MX lookup.
-func CheckDNS(ctx context.Context, domain string) ([]*net.MX, error) {
+// Returns a slice of MXRecord values sorted by preference (lowest = highest priority).
+func CheckDNS(ctx context.Context, domain string) ([]MXRecord, error) {
 	r := &net.Resolver{
 		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			// We must use a direct dialer for DNS because
-			// standard SOCKS5 proxies do not support UDP traffic.
-			d := net.Dialer{
-				Timeout: 3 * time.Second,
+		Dial: func(dialCtx context.Context, network, address string) (net.Conn, error) {
+			// We must use a direct dialer for DNS because standard SOCKS5 proxies
+			// do not support UDP traffic.
+			//
+			// Respect the caller's context deadline rather than always
+			// using a fixed 3-second wall-clock timeout. If the caller's budget
+			// is already tight, a 3-second dial can block well past cancellation.
+			timeout := 3 * time.Second
+			if deadline, ok := dialCtx.Deadline(); ok {
+				if remaining := time.Until(deadline); remaining < timeout {
+					timeout = remaining
+				}
 			}
-			return d.DialContext(ctx, network, address)
+			d := net.Dialer{Timeout: timeout}
+
+			// Try the system-provided DNS address first, then fall back to
+			// Google's public resolver if the system resolver is unreachable.
+			// This prevents a misconfigured /etc/resolv.conf from silently
+			// causing all DNS lookups to fail.
+			conn, err := d.DialContext(dialCtx, network, address)
+			if err != nil {
+				conn, err = d.DialContext(dialCtx, "udp", "8.8.8.8:53")
+			}
+			return conn, err
 		},
 	}
 
-	mxRecords, err := r.LookupMX(ctx, domain)
+	rawRecords, err := r.LookupMX(ctx, domain)
 	if err != nil {
 		return nil, fmt.Errorf("DNS lookup failed: %w", err)
 	}
 
-	if len(mxRecords) == 0 {
+	if len(rawRecords) == 0 {
 		return nil, fmt.Errorf("no MX records found for domain")
 	}
 
-	// Strip the trailing dot from Go's FQDN format.
-	// SOCKS5 proxies will fail to resolve hostnames if they end in a dot.
-	for _, mx := range mxRecords {
-		mx.Host = strings.TrimSuffix(mx.Host, ".")
+	// Copy into our own value-typed MXRecord slice rather than mutating
+	// the *net.MX pointers returned by LookupMX. Go's resolver may cache those
+	// structs internally, and stripping the trailing dot in-place would corrupt
+	// any subsequent lookup that reuses the same cached pointer.
+	records := make([]MXRecord, 0, len(rawRecords))
+	for _, mx := range rawRecords {
+		records = append(records, MXRecord{
+			// Strip the trailing dot from Go's FQDN format.
+			// SOCKS5 proxies will fail to resolve hostnames ending in a dot.
+			Host: strings.TrimSuffix(mx.Host, "."),
+			Pref: mx.Pref,
+		})
 	}
 
-	return mxRecords, nil
+	return records, nil
 }

@@ -8,7 +8,10 @@ import (
 
 // CheckSPF looks for a valid SPF record in TXT entries.
 func CheckSPF(ctx context.Context, domain string) bool {
-	txts, err := net.LookupTXT(domain)
+	// Use the context-aware resolver. The previous call to net.LookupTXT
+	// accepted ctx but never passed it anywhere, meaning a cancelled or timed-out
+	// context had no effect on these DNS calls.
+	txts, err := net.DefaultResolver.LookupTXT(ctx, domain)
 	if err != nil {
 		return false
 	}
@@ -21,11 +24,10 @@ func CheckSPF(ctx context.Context, domain string) bool {
 }
 
 // CheckDMARC looks for a DMARC policy record.
-// Presence of DMARC implies active IT management.
+// Presence of DMARC implies active IT management of the domain.
 func CheckDMARC(ctx context.Context, domain string) bool {
-	// DMARC is always at _dmarc.domain.com
-	dmarcDomain := "_dmarc." + domain
-	txts, err := net.LookupTXT(dmarcDomain)
+	// DMARC is always published at _dmarc.<domain>
+	txts, err := net.DefaultResolver.LookupTXT(ctx, "_dmarc."+domain) // FIX 1
 	if err != nil {
 		return false
 	}
@@ -37,17 +39,22 @@ func CheckDMARC(ctx context.Context, domain string) bool {
 	return false
 }
 
-// CheckSaaSTokens scans DNS TXT records for proof of B2B tool usage.
-// Finding Salesforce or Zendesk tokens proves the domain is used for business.
+// CheckSaaSTokens scans DNS TXT records for proof of B2B SaaS tool usage.
+// Finding tokens for tools like Salesforce or Zendesk proves the domain is
+// actively used for business operations, not just registered and parked.
 func CheckSaaSTokens(ctx context.Context, domain string) bool {
-	txts, err := net.LookupTXT(domain)
+	txts, err := net.DefaultResolver.LookupTXT(ctx, domain) // FIX 1
 	if err != nil {
 		return false
 	}
 
-	// Tokens to look for
+	// Removed "google-site-verification" from this list.
+	// Almost every Google Workspace domain has this TXT record — it's an
+	// infrastructure ownership signal, not evidence of B2B SaaS usage.
+	// Including it caused the p1_saas_usage score boost to fire for the
+	// vast majority of Google-hosted domains regardless of actual tool adoption.
+	// Provider identification is already handled by IdentifyProvider.
 	indicators := []string{
-		"google-site-verification",
 		"salesforce",
 		"zendesk",
 		"atlassian",
@@ -69,16 +76,19 @@ func CheckSaaSTokens(ctx context.Context, domain string) bool {
 }
 
 // IdentifyProvider analyzes MX records to categorize the email infrastructure.
+// Returns a canonical provider string: "proofpoint", "mimecast", "barracuda",
+// "google", "office365", or "generic". Never returns "unknown" — callers should
+// not need to normalise the return value.
 func IdentifyProvider(ctx context.Context, domain string) (string, error) {
 	mxRecords, err := CheckDNS(ctx, domain)
 	if err != nil {
-		return "unknown", err
+		return "generic", err // FIX 3: Return "generic" on error, not "unknown".
 	}
 
 	for _, mx := range mxRecords {
 		host := strings.ToLower(mx.Host)
 
-		// 1. Enterprise Security (High Value)
+		// 1. Enterprise Security Gateways (High Value)
 		if strings.Contains(host, "pphosted.com") {
 			return "proofpoint", nil
 		}
@@ -89,7 +99,7 @@ func IdentifyProvider(ctx context.Context, domain string) (string, error) {
 			return "barracuda", nil
 		}
 
-		// 2. Big Tech (High Reliability)
+		// 2. Major Hosted Providers (High Reliability)
 		if strings.Contains(host, "google.com") || strings.Contains(host, "googlemail.com") {
 			return "google", nil
 		}
