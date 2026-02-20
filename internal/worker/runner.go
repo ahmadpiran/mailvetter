@@ -44,7 +44,7 @@ func Start(concurrency int) {
 
 				func() {
 					// 3. PROCESS
-					valCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+					valCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 					defer cancel() // Safe to defer here now!
 
 					parts, _ := validator.VerifyEmail(valCtx, task.Email, extractDomain(task.Email))
