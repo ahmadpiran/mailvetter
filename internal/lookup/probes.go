@@ -17,7 +17,13 @@ import (
 )
 
 var sharedClient = &http.Client{
-	Timeout: 15 * time.Second,
+	// The 15-second client-level Timeout has been removed.
+	// All probe requests are made with http.NewRequestWithContext, so the caller's
+	// context deadline is already the primary cancellation mechanism. A hard client
+	// timeout here would silently override context deadlines shorter than 15s,
+	// causing probes to block well past the point the caller has given up.
+	// A 20-second backstop is kept only as a last resort for contexts with no deadline.
+	Timeout: 20 * time.Second,
 	Transport: &http.Transport{
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			if proxy.Enabled() {
@@ -40,18 +46,25 @@ func getRandomUserAgent() string {
 	return userAgents[rand.Intn(len(userAgents))]
 }
 
-// --- Semaphore ---
-// This strict-limits our HTTP concurrency to perfectly match your proxy plan.
-
+// DoProxiedRequest executes an HTTP request, routing it through the proxy semaphore
+// when a proxy is enabled to cap concurrent outbound connections.
 func DoProxiedRequest(req *http.Request) (*http.Response, error) {
 	if proxy.Enabled() {
-		proxy.Semaphore <- struct{}{}        // Wait in line
-		defer func() { <-proxy.Semaphore }() // Give the slot back
+		// Semaphore acquisition is now context-aware.
+		// Previously this blocked unconditionally, meaning a caller with an expired
+		// context would sit here waiting for a free proxy slot indefinitely.
+		select {
+		case proxy.Semaphore <- struct{}{}:
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
+		defer func() { <-proxy.Semaphore }()
 	}
 	return sharedClient.Do(req)
 }
 
 // --- INFRASTRUCTURE ---
+
 func CheckOffice365(ctx context.Context, domain string) bool {
 	mxRecords, err := CheckDNS(ctx, domain)
 	if err == nil {
@@ -78,6 +91,11 @@ func CheckGoogleWorkspace(ctx context.Context, domain string) bool {
 
 // --- APP PROBES ---
 
+// CheckTeamsPresence checks SRV records for SIP federation (a domain-level signal)
+// then confirms user existence via the Microsoft login endpoint.
+// Note: SRV federation records are not exclusive to Teams — Skype for Business and
+// third-party UCaaS providers use the same records. This probe is best treated as
+// a corroborating signal rather than a definitive Teams confirmation.
 func CheckTeamsPresence(ctx context.Context, email, domain string) bool {
 	_, addrs, err := net.LookupSRV("sipfederationtls", "tcp", domain)
 	if err != nil || len(addrs) == 0 {
@@ -89,15 +107,18 @@ func CheckTeamsPresence(ctx context.Context, email, domain string) bool {
 	return CheckMicrosoftLogin(ctx, email)
 }
 
+// CheckGoogleCalendar probes the CalDAV endpoint for the given email.
+// A 401 response indicates the user exists but requires authentication.
+// Note: PROPFIND would be more semantically appropriate here, but many
+// CalDAV servers do not respond consistently to it without auth headers.
 func CheckGoogleCalendar(ctx context.Context, email string) bool {
 	url := fmt.Sprintf("https://calendar.google.com/calendar/dav/%s/events", email)
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return false
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	// UPDATED: Use the Semaphore wrapper
 	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
@@ -106,6 +127,8 @@ func CheckGoogleCalendar(ctx context.Context, email string) bool {
 	return resp.StatusCode == 401 || resp.StatusCode == 200
 }
 
+// CheckSharePoint probes the user's personal OneDrive/SharePoint URL.
+// A 401 or 403 response indicates the personal site exists but requires auth.
 func CheckSharePoint(ctx context.Context, email string) bool {
 	parts := strings.Split(email, "@")
 	if len(parts) != 2 {
@@ -113,7 +136,16 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 	}
 	user := parts[0]
 	domain := parts[1]
-	baseTenant := strings.Split(domain, ".")[0]
+
+	// Guard against malformed single-segment domains (no dots).
+	// strings.Split(domain, ".")[0] on "localdomain" would silently produce
+	// a nonsensical SharePoint URL instead of failing cleanly.
+	domainParts := strings.Split(domain, ".")
+	if len(domainParts) < 2 {
+		return false
+	}
+
+	baseTenant := domainParts[0]
 	userPath := fmt.Sprintf("%s_%s", user, strings.ReplaceAll(domain, ".", "_"))
 	url := fmt.Sprintf("https://%s-my.sharepoint.com/personal/%s", baseTenant, userPath)
 
@@ -123,7 +155,6 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	// UPDATED: Use the Semaphore wrapper
 	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
@@ -146,7 +177,6 @@ func CheckGravatar(ctx context.Context, email string) bool {
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	// UPDATED: Use the Semaphore wrapper
 	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
@@ -163,7 +193,6 @@ func CheckGitHub(ctx context.Context, email string) bool {
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	// UPDATED: Use the Semaphore wrapper
 	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false
@@ -198,7 +227,6 @@ func CheckMicrosoftLogin(ctx context.Context, email string) bool {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	// UPDATED: Use the Semaphore wrapper
 	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return false

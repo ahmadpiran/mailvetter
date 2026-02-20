@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // CheckAdobe checks the Adobe Identity Management endpoint.
-// This is excellent for creative professionals.
+// A 200 response containing an accountType field indicates a valid Adobe account.
+// This is a strong signal for creative professionals.
 func CheckAdobe(ctx context.Context, email string) bool {
 	url := "https://auth.services.adobe.com/signin/v2/users/accounts"
 
@@ -33,19 +35,29 @@ func CheckAdobe(ctx context.Context, email string) bool {
 	}
 	defer resp.Body.Close()
 
-	// Adobe returns 200 with a JSON list of accounts if the user exists.
-	// We check if the response body contains "accountType" which implies a valid user object.
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	// ReadFrom error is no longer silently discarded.
+	// A partial body due to a dropped connection would previously produce an
+	// incomplete string that might return false incorrectly rather than
+	// being treated as a transient failure.
 	buf := new(bytes.Buffer)
-	buf.ReadFrom(resp.Body)
+	if _, err := buf.ReadFrom(resp.Body); err != nil {
+		return false
+	}
 	bodyStr := buf.String()
 
-	return (resp.StatusCode == 200 && len(bodyStr) > 50 && contains(bodyStr, "accountType"))
+	// Replaced hand-rolled contains/searchStr helpers with strings.Contains.
+	// The previous implementation was a manual reimplementation of exactly what
+	// strings.Contains does, with more code and no benefit.
+	return len(bodyStr) > 50 && strings.Contains(bodyStr, "accountType")
 }
 
-// CheckDomainAge queries RDAP to find the domain creation date.
-// It uses rdap.org as a bootstrap to find the correct TLD server.
+// CheckDomainAge queries RDAP to find the domain creation date and returns
+// the domain's age in days. Returns 0 if the age cannot be determined.
 func CheckDomainAge(ctx context.Context, domain string) int {
-	// 1. Query the RDAP bootstrap service
 	url := "https://rdap.org/domain/" + domain
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -54,7 +66,6 @@ func CheckDomainAge(ctx context.Context, domain string) int {
 	}
 	req.Header.Set("Accept", "application/rdap+json")
 
-	// Use the shared client (handles redirects automatically)
 	resp, err := DoProxiedRequest(req)
 	if err != nil {
 		return 0
@@ -65,8 +76,6 @@ func CheckDomainAge(ctx context.Context, domain string) int {
 		return 0
 	}
 
-	// 2. Parse the RDAP JSON
-	// We only care about the "events" array to find "registration" or "creation"
 	var rdap struct {
 		Events []struct {
 			Action string `json:"eventAction"`
@@ -78,15 +87,19 @@ func CheckDomainAge(ctx context.Context, domain string) int {
 		return 0
 	}
 
-	// 3. Find the oldest date
+	// Previously the loop broke on the first registration/creation event found.
+	// RDAP responses may contain multiple events of the same type (e.g. after a
+	// transfer or re-registration), and the earliest one may not appear first.
+	// We now scan all events and keep the oldest date seen.
 	var created time.Time
 	for _, event := range rdap.Events {
 		if event.Action == "registration" || event.Action == "creation" {
-			// RDAP dates are standard RFC3339 (ISO 8601)
 			t, err := time.Parse(time.RFC3339, event.Date)
-			if err == nil {
+			if err != nil {
+				continue
+			}
+			if created.IsZero() || t.Before(created) {
 				created = t
-				break
 			}
 		}
 	}
@@ -95,22 +108,6 @@ func CheckDomainAge(ctx context.Context, domain string) int {
 		return 0
 	}
 
-	// 4. Calculate Age in Days
 	days := int(time.Since(created).Hours() / 24)
 	return days
-}
-
-// Helpers
-func contains(s, substr string) bool {
-	return len(s) > 0 && len(substr) > 0 && len(s) >= len(substr) &&
-		(s == substr || (len(s) > len(substr) && searchStr(s, substr)))
-}
-
-func searchStr(s, substr string) bool {
-	for i := 0; i < len(s)-len(substr)+1; i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
