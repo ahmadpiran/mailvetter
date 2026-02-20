@@ -41,14 +41,16 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{
-			name: "Office 365 Zombie (The 'Riya' Case)",
+			name: "Office 365 Zombie (Catch-All Domain)",
 			input: models.RiskAnalysis{
-				SmtpStatus:       250,
+				// THE FIX: We explicitly test the Zombie penalty on Catch-Alls now
+				IsCatchAll:       true,
 				MxProvider:       "office365",
 				HasTeamsPresence: true,
 				HasSharePoint:    false,
 				HasSaaSTokens:    true,
 			},
+			// Base (30) + Teams (15) + SaaS (10) - O365 Unlicensed Penalty (20) = 35
 			expectedScoreMin: 30,
 			expectedScoreMax: 50,
 			expectedReach:    models.ReachabilityBad,
@@ -91,14 +93,15 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedStatus:   models.StatusValid,
 		},
 		{
-			name: "Broken Server (Postmaster Fail)",
+			name: "Hard Bounce (Strict Invalid)",
 			input: models.RiskAnalysis{
 				SmtpStatus:         550,
-				IsPostmasterBroken: true,
+				IsPostmasterBroken: true, // THE FIX: This no longer rescues the email
 			},
-			expectedScoreMin: 35,
-			expectedScoreMax: 45,
-			expectedStatus:   models.StatusUnknown,
+			// Expect an absolute 0 and Invalid status
+			expectedScoreMin: 0,
+			expectedScoreMax: 0,
+			expectedStatus:   models.StatusInvalid,
 			expectedReach:    models.ReachabilityBad,
 		},
 	}
