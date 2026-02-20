@@ -16,8 +16,13 @@ const (
 	MailFrom = "verify@mailvetter.com"
 )
 
+// Prevents the VPS IP from being banned by Google/Outlook for opening too many concurrent connections.
+var SMTPSemaphore = make(chan struct{}, 15)
+
 // CheckSMTP performs a standard probe via direct or proxy connection.
 func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, time.Duration, error) {
+	SMTPSemaphore <- struct{}{}        // Grab a connection token
+	defer func() { <-SMTPSemaphore }() // Release it when done
 	start := time.Now()
 
 	var conn net.Conn
@@ -78,6 +83,9 @@ func CheckPostmaster(ctx context.Context, mxHost, domain string) bool {
 
 // CheckVRFY attempts to verify the user using the VRFY command.
 func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
+	SMTPSemaphore <- struct{}{}        // Grab a connection token
+	defer func() { <-SMTPSemaphore }() // Release it when done
+
 	var conn net.Conn
 	var err error
 

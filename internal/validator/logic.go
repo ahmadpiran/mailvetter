@@ -318,6 +318,16 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 		delta = int64(math.Abs(d))
 	}
 
+	// --- Transient Error Detection ---
+	// If either probe failed due to an IP ban, rate limit, or network drop (not a clean 550),
+	// we CANNOT make a definitive decision. We must fail back to Unknown.
+	targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
+	ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
+
+	if targetTransient || ghostTransient {
+		return 0, 0, false
+	}
+
 	status := 0
 	isCatchAll := false
 
@@ -327,7 +337,7 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 		status = 250 // Valid
 	} else if !targetValid && lookup.IsNoSuchUserError(targetErr) {
 		status = 550 // Invalid
-	} else if targetValid {
+	} else if targetValid && ghostValid { // Safely verify BOTH actually returned 250 OK
 		status = 0
 		isCatchAll = true
 	}
