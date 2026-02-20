@@ -14,7 +14,7 @@ import (
 
 const (
 	HeloHost = "mta1.mailvetter.com" // Identify yourself politely
-	MailFrom = "verify@mailvetter.com"
+	MailFrom = "ayan@mailvetter.com"
 )
 
 // Prevents the VPS IP from being banned by Google/Outlook for opening too many concurrent connections.
