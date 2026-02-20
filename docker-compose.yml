@@ -11,8 +11,8 @@ services:
       - DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db?pool_max_conns=100
       - PROXY_LIST=${PROXY_LIST}
       - API_SECRET_KEY=${API_SECRET_KEY}
-      - PROXY_CONCURRENCY=5
-      - SMTP_PROXY_ENABLED=true
+      - PROXY_CONCURRENCY=${PROXY_CONCURRENCY:-5}
+      - SMTP_PROXY_ENABLED=${SMTP_PROXY_ENABLED:-true}
     depends_on:
       - redis
       - postgres
@@ -31,9 +31,8 @@ services:
       - REDIS_ADDR=redis:6379
       - DB_URL=postgres://mv_user:mv_password@postgres:5432/mailvetter_db?pool_max_conns=100
       - PROXY_LIST=${PROXY_LIST}
-      - WORKER_CONCURRENCY=50
-      - PROXY_CONCURRENCY=5
-      - SMTP_PROXY_ENABLED=true
+      - PROXY_CONCURRENCY=${PROXY_CONCURRENCY:-5}
+      - SMTP_PROXY_ENABLED=${SMTP_PROXY_ENABLED:-true}
     networks:
       - mv-net
     depends_on:

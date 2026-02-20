@@ -37,21 +37,19 @@ func main() {
 
 	// 3. Initialize Proxy Manager
 	proxyListRaw := os.Getenv("PROXY_LIST")
+	proxyLimitStr := os.Getenv("PROXY_CONCURRENCY")
+	proxyLimit, _ := strconv.Atoi(proxyLimitStr)
+
+	smtpProxyStr := strings.ToLower(os.Getenv("SMTP_PROXY_ENABLED"))
+	smtpProxyEnabled := smtpProxyStr == "true" || smtpProxyStr == "1"
+
 	if proxyListRaw != "" {
 		proxies := strings.Split(proxyListRaw, ",")
-
-		proxyLimitStr := os.Getenv("PROXY_CONCURRENCY")
-		proxyLimit, _ := strconv.Atoi(proxyLimitStr)
-
-		// Read the SMTP toggle
-		smtpProxyStr := strings.ToLower(os.Getenv("SMTP_PROXY_ENABLED"))
-		smtpProxyEnabled := smtpProxyStr == "true" || smtpProxyStr == "1"
-
 		if err := proxy.Init(proxies, proxyLimit, smtpProxyEnabled); err != nil {
 			log.Fatalf("❌ Failed to initialize proxy manager: %v", err)
 		}
 
-		log.Printf("🛡️  Proxy rotation enabled (%d proxies loaded, max %d concurrent HTTP)", len(proxies), cap(proxy.Semaphore))
+		log.Printf("🛡️  Proxy rotation enabled (%d proxies loaded, max %d concurrent HTTP)\n", len(proxies), cap(proxy.Semaphore))
 		if smtpProxyEnabled {
 			log.Println("⚠️  SMTP Proxying is ENABLED (Port 25 traffic will route through proxies)")
 		} else {
@@ -61,12 +59,31 @@ func main() {
 		log.Println("⚠️  No proxies configured. Running with direct connections.")
 	}
 
-	// 4. Start the Processing Loop
+	// 4. Start the Processing Loop with Dynamic Auto-Tuning
 	concurrencyStr := os.Getenv("WORKER_CONCURRENCY")
-	concurrency := 20 // Default to 20 parallel workers
+	var concurrency int
 
 	if c, err := strconv.Atoi(concurrencyStr); err == nil && c > 0 {
+		// User explicitly set a limit in .env, respect it
 		concurrency = c
+	} else {
+		// Auto-Tuning Logic
+		if proxyListRaw != "" && smtpProxyEnabled {
+			// Proxy mode: Scale workers to Proxy Slots x 2.
+			// This keeps the 5 proxy slots saturated without causing Context Starvation.
+			actualProxyLimit := cap(proxy.Semaphore)
+			concurrency = actualProxyLimit * 2
+
+			// Failsafe minimum so the engine doesn't crawl
+			if concurrency < 10 {
+				concurrency = 10
+			}
+			log.Printf("🧠 Auto-tuning WORKER_CONCURRENCY to %d to match Proxy constraints", concurrency)
+		} else {
+			// Hybrid or Direct mode: Safe to run high concurrency
+			concurrency = 50
+			log.Printf("🧠 Auto-tuning WORKER_CONCURRENCY to %d (Direct SMTP Mode)", concurrency)
+		}
 	}
 
 	worker.Start(concurrency)

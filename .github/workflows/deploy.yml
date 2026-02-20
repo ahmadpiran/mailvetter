@@ -85,6 +85,6 @@ jobs:
             # Pull new image
             docker compose pull
             # Restart containers (Injecting the API Key)
-            HIBP_API_KEY=${{ secrets.HIBP_API_KEY }} PROXY_LIST=${{ secrets.PROXY_LIST }} API_SECRET_KEY=${{ secrets.API_SECRET_KEY }} docker compose up -d --remove-orphans
+            PROXY_CONCURRENCY=${{ secrets.PROXY_CONCURRENCY }} SMTP_PROXY_ENABLED=${{ secrets.SMTP_PROXY_ENABLED }} HIBP_API_KEY=${{ secrets.HIBP_API_KEY }} PROXY_LIST=${{ secrets.PROXY_LIST }} API_SECRET_KEY=${{ secrets.API_SECRET_KEY }} docker compose up -d --remove-orphans
             # Cleanup
             docker image prune -f
