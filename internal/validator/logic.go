@@ -293,24 +293,44 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	randomUser := generateRandomString(12)
 	ghostEmail := randomUser + "@" + domain
 
-	var ghostTime, targetTime time.Duration
-	var ghostValid, targetValid bool
+	var targetValid, ghostValid bool
+	var targetTime, ghostTime time.Duration
 	var targetErr, ghostErr error
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	// Local Micro-Retry Loop
+	// If the proxy IP gets temporarily rate-limited by the MX server, we back off and try again.
+	for attempt := 1; attempt <= 2; attempt++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
 
-	go func() {
-		defer wg.Done()
-		targetValid, targetTime, targetErr = lookup.CheckSMTP(ctx, primaryMX, email)
-	}()
+		go func() {
+			defer wg.Done()
+			targetValid, targetTime, targetErr = lookup.CheckSMTP(ctx, primaryMX, email)
+		}()
 
-	go func() {
-		defer wg.Done()
-		ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail)
-	}()
+		go func() {
+			defer wg.Done()
+			ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail)
+		}()
 
-	wg.Wait()
+		wg.Wait()
+
+		targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
+		ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
+
+		// If we got a definitive answer from both probes (or a clean 550 bounce), break the loop
+		if !targetTransient && !ghostTransient {
+			break
+		}
+
+		// If we hit a transient error on attempt 1, pause for 2 seconds and retry
+		if attempt == 1 {
+			log.Printf("[DEBUG] Transient error via proxy for %s, retrying...", email)
+			time.Sleep(2 * time.Second)
+		}
+
+		// If attempt 2 also fails, we will accept the Unknown status below.
+	}
 
 	delta := int64(0)
 	if ghostTime > 0 && targetTime > 0 {
@@ -318,9 +338,7 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 		delta = int64(math.Abs(d))
 	}
 
-	// --- Transient Error Detection ---
-	// If either probe failed due to an IP ban, rate limit, or network drop (not a clean 550),
-	// we CANNOT make a definitive decision. We must fail back to Unknown.
+	// If the proxy is completely blocked and both attempts failed, fail safely
 	targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
 	ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
 
@@ -337,7 +355,7 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 		status = 250 // Valid
 	} else if !targetValid && lookup.IsNoSuchUserError(targetErr) {
 		status = 550 // Invalid
-	} else if targetValid && ghostValid { // Safely verify BOTH actually returned 250 OK
+	} else if targetValid {
 		status = 0
 		isCatchAll = true
 	}

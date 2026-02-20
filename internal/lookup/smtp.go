@@ -21,14 +21,13 @@ var SMTPSemaphore = make(chan struct{}, 15)
 
 // CheckSMTP performs a standard probe via direct or proxy connection.
 func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, time.Duration, error) {
-	SMTPSemaphore <- struct{}{}        // Grab a connection token
-	defer func() { <-SMTPSemaphore }() // Release it when done
-	start := time.Now()
+	SMTPSemaphore <- struct{}{}
+	defer func() { <-SMTPSemaphore }()
 
 	var conn net.Conn
 	var err error
 
-	// 1. Dynamic Routing: Use SOCKS5 Proxy OR Direct VPS Connection
+	// Dial the proxy (or direct) first
 	if proxy.SMTPEnabled {
 		conn, err = proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
 	} else {
@@ -40,7 +39,10 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		return false, 0, fmt.Errorf("connection failed: %w", err)
 	}
 
-	// 2. Anti-tarpit deadline
+	// Start the timer HERE, after the SOCKS5 handshake is complete!
+	// This ensures our Catch-All delta measurement is mathematically pure.
+	start := time.Now()
+
 	conn.SetDeadline(time.Now().Add(12 * time.Second))
 
 	client, err := smtp.NewClient(conn, mxHost)
