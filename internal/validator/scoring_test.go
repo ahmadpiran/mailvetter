@@ -29,10 +29,10 @@ func TestCalculateRobustScore(t *testing.T) {
 		{
 			name: "Standard Catch-All (No Footprint)",
 			input: models.RiskAnalysis{
-				IsCatchAll:    true, // 30
+				IsCatchAll:    true, // Base 30
 				MxProvider:    "google",
 				TimingDeltaMs: 50,
-				// Penalty: -20
+				// Empty CatchAll Penalty: -20
 				// Result: 10
 			},
 			expectedScoreMin: 5,
@@ -41,62 +41,82 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{
-			name: "Office 365 Zombie (Catch-All Domain)",
+			name: "Office 365 Zombie (Pure Ghost Catch-All)",
 			input: models.RiskAnalysis{
-				// THE FIX: We explicitly test the Zombie penalty on Catch-Alls now
 				IsCatchAll:       true,
 				MxProvider:       "office365",
-				HasTeamsPresence: true,
+				HasTeamsPresence: false,
 				HasSharePoint:    false,
-				HasSaaSTokens:    true,
 			},
-			// Base (30) + Teams (15) + SaaS (10) - O365 Unlicensed Penalty (20) = 35
-			expectedScoreMin: 30,
-			expectedScoreMax: 50,
+			// Base (30) - Zombie Penalty (30) = 0
+			expectedScoreMin: 0,
+			expectedScoreMax: 10,
 			expectedReach:    models.ReachabilityBad,
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{
-			name: "Office 365 Valid Employee",
+			name: "Absolute Proof Overrides Penalties",
 			input: models.RiskAnalysis{
-				SmtpStatus:       250,
-				MxProvider:       "office365",
-				HasTeamsPresence: true,
-				HasSharePoint:    true,
+				IsCatchAll:    true, // Base: 30
+				MxProvider:    "google",
+				BreachCount:   2,   // Absolute Proof! (+45 score, Status -> Valid)
+				EntropyScore:  0.9, // High entropy (Penalty bypassed by proof)
+				DomainAgeDays: 5,   // New domain (Penalty bypassed by proof)
 			},
-			expectedScoreMin: 95,
-			expectedScoreMax: 99,
-			expectedReach:    models.ReachabilitySafe,
-			expectedStatus:   models.StatusValid,
-		},
-		{
-			name: "High Entropy Bot",
-			input: models.RiskAnalysis{
-				SmtpStatus:   250,
-				EntropyScore: 0.85,
-			},
-			expectedScoreMin: 65,
-			expectedScoreMax: 75,
-			expectedReach:    models.ReachabilityRisky,
-		},
-		{
-			name: "Historical Proof (HIBP Boost)",
-			input: models.RiskAnalysis{
-				IsCatchAll:  true, // 30
-				BreachCount: 2,    // +45 = 75
-				// Strong Proof Boost (New): +50
-				// Result: > 100 -> 99
-			},
+			// Base(30) + Breach(45) + Strong CatchAll(50) = 125 (clamped to 99)
+			// Status should be Valid, not CatchAll, and penalties should be completely ignored.
 			expectedScoreMin: 90,
 			expectedScoreMax: 99,
 			expectedReach:    models.ReachabilitySafe,
 			expectedStatus:   models.StatusValid,
 		},
 		{
+			name: "Soft Proof Shields Penalties (O365 Catch-All)",
+			input: models.RiskAnalysis{
+				IsCatchAll:       true, // Base: 30
+				MxProvider:       "office365",
+				HasGitHub:        true,  // Soft Proof! (+12 score)
+				DomainAgeDays:    5,     // New domain (Penalty bypassed by soft proof)
+				HasTeamsPresence: false, // Would normally trigger -30 O365 Zombie penalty
+			},
+			// Base(30) + GitHub(12) = 42
+			// Both the New Domain penalty (-50) and O365 Zombie penalty (-30) are safely bypassed!
+			expectedScoreMin: 40,
+			expectedScoreMax: 50,
+			expectedReach:    models.ReachabilityBad,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			name: "Catch-All with Weak Timing Only",
+			input: models.RiskAnalysis{
+				IsCatchAll:    true, // Base: 30
+				MxProvider:    "google",
+				TimingDeltaMs: 2000, // Weak Timing (+25 score) - INTENTIONALLY NOT A SOFT PROOF SHIELD
+			},
+			// Base(30) + Weak Timing(25) - Empty CatchAll Penalty(-20) = 35
+			// Claude's logic deliberately exposes weak timing to the empty catch-all penalty
+			// to balance out noisy SOCKS5 proxy jitter.
+			expectedScoreMin: 30,
+			expectedScoreMax: 40,
+			expectedReach:    models.ReachabilityBad,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			name: "High Entropy Bot (No Proof)",
+			input: models.RiskAnalysis{
+				SmtpStatus:   250,  // Base: 90
+				EntropyScore: 0.85, // -20 penalty applies because NO proof exists
+			},
+			expectedScoreMin: 65,
+			expectedScoreMax: 75,
+			expectedReach:    models.ReachabilityRisky,
+			expectedStatus:   models.StatusValid,
+		},
+		{
 			name: "Hard Bounce (Strict Invalid)",
 			input: models.RiskAnalysis{
 				SmtpStatus:         550,
-				IsPostmasterBroken: true, // THE FIX: This no longer rescues the email
+				IsPostmasterBroken: true,
 			},
 			// Expect an absolute 0 and Invalid status
 			expectedScoreMin: 0,

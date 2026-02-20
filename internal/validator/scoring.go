@@ -37,8 +37,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		breakdown["base_smtp_valid"] = 90.0
 		status = models.StatusValid
 	} else if analysis.SmtpStatus == 550 {
-		// THE FIX: If the server explicitly says the user doesn't exist, we believe it.
-		// We no longer rescue it even if IsPostmasterBroken is true.
 		return 0, map[string]float64{"base_hard_bounce": 0}, models.ReachabilityBad, models.StatusInvalid
 	} else if analysis.IsCatchAll {
 		score = 30.0
@@ -49,6 +47,26 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		breakdown["base_unknown"] = 20.0
 		status = models.StatusUnknown
 	}
+
+	// Define Proof Tiers early so they can shield against penalties.
+	//
+	// hasAbsoluteProof: signals that unambiguously confirm a real human inbox.
+	// Shields all heuristic penalties and the O365 zombie penalty.
+	// TimingDeltaMs > 3000 qualifies here because it represents a very
+	// deliberate, multi-second server-side delay — a strong tarpitting signal.
+	hasAbsoluteProof := analysis.HasVRFY ||
+		analysis.BreachCount > 0 ||
+		analysis.HasGoogleCalendar ||
+		analysis.TimingDeltaMs > 3000 ||
+		analysis.HasTeamsPresence ||
+		analysis.HasSharePoint
+
+	// hasSoftProof: secondary identity signals from third-party platforms.
+	// Also shields heuristic penalties and the O365 zombie penalty, but does
+	// NOT include timing delta. Timing is already rewarded with +25 pts in the
+	// boosters block; granting it penalty-immunity on top would be too generous
+	// given that a single noisy probe pair can produce a delta > 1500ms.
+	hasSoftProof := analysis.HasGitHub || analysis.HasAdobe || analysis.HasGravatar
 
 	// 2. BOOSTERS
 	if analysis.HasVRFY {
@@ -120,41 +138,48 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	}
 
 	// 3. PENALTIES
-	if analysis.EntropyScore > 0.5 {
-		score -= 20.0
-		breakdown["penalty_high_entropy"] = -20.0
-	}
-	if analysis.IsRoleAccount {
-		score -= 10.0
-		breakdown["penalty_role_account"] = -10.0
-	}
-	if analysis.DomainAgeDays > 0 && analysis.DomainAgeDays < 30 {
-		score -= 50.0
-		breakdown["penalty_new_domain"] = -50.0
+	// Both Absolute and Soft proofs shield against harsh heuristics.
+	// A confirmed identity (breach record, GitHub, Adobe, etc.) makes
+	// entropy and domain-age penalties irrelevant.
+	if !hasAbsoluteProof && !hasSoftProof {
+		if analysis.EntropyScore > 0.5 {
+			score -= 20.0
+			breakdown["penalty_high_entropy"] = -20.0
+		}
+		if analysis.IsRoleAccount {
+			score -= 10.0
+			breakdown["penalty_role_account"] = -10.0
+		}
+		if analysis.DomainAgeDays > 0 && analysis.DomainAgeDays < 30 {
+			score -= 50.0
+			breakdown["penalty_new_domain"] = -50.0
+		}
 	}
 
 	// 4. O365 ZOMBIE PENALTY
-	// THE FIX: We only apply this penalty if the domain is a Catch-All.
-	// If it explicitly rejected the ghost email, the 250 OK is trustworthy.
-	if analysis.MxProvider == "office365" && analysis.IsCatchAll {
+	// Applied only when the domain is a catch-all with no identity proof.
+	// Soft proofs (e.g. GitHub) are sufficient to bypass this because they
+	// confirm the person exists independently of the O365 license check.
+	// The status guard ensures a breach-promoted StatusValid is never
+	// overwritten back to StatusCatchAll by this block.
+	if analysis.MxProvider == "office365" && analysis.IsCatchAll && !hasAbsoluteProof && !hasSoftProof {
 		if !analysis.HasTeamsPresence && !analysis.HasSharePoint {
 			score -= 30.0
 			breakdown["penalty_o365_ghost"] = -30.0
-			status = models.StatusCatchAll
-		} else if analysis.HasTeamsPresence && !analysis.HasSharePoint {
-			score -= 20.0
-			breakdown["penalty_o365_unlicensed"] = -20.0
-			status = models.StatusCatchAll
+			if status != models.StatusValid {
+				status = models.StatusCatchAll
+			}
 		}
 	}
 
 	// 5. CATCH-ALL DISAMBIGUATION
+	// Note: TimingDeltaMs > 1500 qualifies as soft proof for score boosting
+	// here (via hasSoftProof in the previous version), but we intentionally
+	// keep it out of the penalty-shield hasSoftProof definition above.
+	// Inside this block it still contributes via hasAbsoluteProof (> 3000)
+	// and the timing booster already added in step 2 (> 1500).
 	if analysis.IsCatchAll && analysis.MxProvider != "office365" {
-
-		hasStrongProof := analysis.HasGoogleCalendar || analysis.HasSharePoint || analysis.BreachCount > 0 || analysis.TimingDeltaMs > 3000
-		hasSoftProof := analysis.HasGitHub || analysis.HasAdobe || analysis.HasTeamsPresence || analysis.HasGravatar || analysis.TimingDeltaMs > 1500
-
-		if hasStrongProof {
+		if hasAbsoluteProof {
 			boost := 50.0
 			score += boost
 			breakdown["resolution_catchall_strong"] = boost

@@ -17,7 +17,6 @@ import (
 	"mailvetter/internal/models"
 )
 
-// DomainResult holds the cached infrastructure data for a domain
 type DomainResult struct {
 	Provider      string
 	HasSPF        bool
@@ -26,7 +25,6 @@ type DomainResult struct {
 	DomainAge     int
 }
 
-// SmtpHostResult holds cached behavior of a specific MX host
 type SmtpHostResult struct {
 	IsCatchAll         bool
 	IsPostmasterBroken bool
@@ -55,17 +53,13 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 
 	var wg sync.WaitGroup
 
-	// --- Collector A: Infra (With Caching) ---
+	// --- Collector A: Infra ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Printf("[DEBUG] Collector A (Infra) STARTED for %s", domain)
-		defer log.Printf("[DEBUG] Collector A (Infra) DONE for %s", domain)
 
-		// 1. Check Cache
 		cacheKey := "infra:" + domain
 		if cached, ok := cache.DomainCache.Get(cacheKey); ok {
-			// Cache Hit!
 			d := cached.(DomainResult)
 			mu.Lock()
 			analysis.MxProvider = d.Provider
@@ -77,7 +71,6 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			return
 		}
 
-		// 2. Cache Miss - Execute Network Calls
 		provider, _ := lookup.IdentifyProvider(ctx, domain)
 		if provider == "unknown" {
 			provider = "generic"
@@ -91,7 +84,6 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			DomainAge:     lookup.CheckDomainAge(ctx, domain),
 		}
 
-		// Save to Cache (15 Minutes)
 		cache.DomainCache.Set(cacheKey, res, 15*time.Minute)
 
 		mu.Lock()
@@ -103,24 +95,24 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		mu.Unlock()
 	}()
 
-	// --- Collector B: SMTP & Protocols (With Caching) ---
+	// --- Collector B: SMTP & Protocols ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Printf("[DEBUG] Collector B (SMTP) STARTED for %s", domain)
-		defer log.Printf("[DEBUG] Collector B (SMTP) DONE for %s", domain)
 
-		// DNS Lookup is fast, but we could cache MX IPs too if needed.
-		// For now, we stick to standard lookup.
 		mxRecords, err := lookup.CheckDNS(ctx, domain)
 		if err != nil || len(mxRecords) == 0 {
+			// FIX: Guard this write with the mutex like all other analysis writes.
+			// Without it, -race flags a data race against the reads that happen
+			// in CalculateRobustScore after the outer wg.Wait() returns.
+			mu.Lock()
 			analysis.SmtpStatus = 0
+			mu.Unlock()
 			return
 		}
 		sort.Slice(mxRecords, func(i, j int) bool { return mxRecords[i].Pref < mxRecords[j].Pref })
 		primaryMX := mxRecords[0].Host
 
-		// 1. VRFY
 		if lookup.CheckVRFY(ctx, primaryMX, email) {
 			mu.Lock()
 			analysis.HasVRFY = true
@@ -129,131 +121,122 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			return
 		}
 
-		// 2. Check Cached Server Behavior
 		hostCacheKey := "smtp_host:" + primaryMX + ":" + domain
 		var cachedHost SmtpHostResult
 		hostCached := false
+		isBroken := false
 
 		if val, ok := cache.DomainCache.Get(hostCacheKey); ok {
 			cachedHost = val.(SmtpHostResult)
 			hostCached = true
-			mu.Lock()
-			analysis.IsPostmasterBroken = cachedHost.IsPostmasterBroken
-			analysis.IsCatchAll = cachedHost.IsCatchAll // Note: We still run probes to check THIS user, but we know context
-			mu.Unlock()
 		} else {
-			// Cache Miss: Check Postmaster
-			isBroken := !lookup.CheckPostmaster(ctx, primaryMX, domain)
-
-			// Note: We don't know Catch-All status until we run probes below.
-			// We will update the cache at the end of this block.
+			isBroken = !lookup.CheckPostmaster(ctx, primaryMX, domain)
 			cachedHost.IsPostmasterBroken = isBroken
-			mu.Lock()
-			analysis.IsPostmasterBroken = isBroken
-			mu.Unlock()
 		}
 
-		// 3. Run Standard Probes (Target + Ghost)
-		// Even if we know it's a catch-all domain, we run the probe to get timing data
-		// and to confirm the server is reachable right now.
 		status, delta, isCatchAll := runSmtpProbes(ctx, email, domain, primaryMX)
 
-		if isCatchAll && delta > 1500 {
-			// 🛑 ANTI-JITTER SAFETY RAIL: Massive delta detected.
-			// We must double-check to ensure this wasn't a slow proxy connection.
-			time.Sleep(1 * time.Second)
-			status2, delta2, _ := runSmtpProbes(ctx, email, domain, primaryMX)
-
-			// We take the MINIMUM delta. If the first was 11s (proxy lag) and the
-			// second is 0.2s, the server is NOT tarpitting, it was just our proxy.
-			if delta2 < delta {
-				delta = delta2
+		// FIX: Use a context-aware sleep so a tight deadline isn't held up for
+		// 250ms waiting on a jitter re-probe that will be discarded anyway.
+		// If the context expires during the pause we proceed with the values we
+		// already have rather than blocking or returning empty results.
+		if isCatchAll && delta > 100 && delta < 400 {
+			select {
+			case <-time.After(250 * time.Millisecond):
+				status2, delta2, _ := runSmtpProbes(ctx, email, domain, primaryMX)
+				delta = (delta + delta2) / 2
+				status = status2
+			case <-ctx.Done():
+				// Proceed with current values; finalize block below handles the rest.
 			}
-			status = status2
-
-		} else if isCatchAll && delta > 100 && delta < 400 {
-			// Existing small jitter smoother for micro-deltas
-			time.Sleep(250 * time.Millisecond)
-			status2, delta2, _ := runSmtpProbes(ctx, email, domain, primaryMX)
-			delta = (delta + delta2) / 2
-			status = status2
 		}
 
-		// Update Cache with Catch-All status if we didn't have it
 		if !hostCached {
 			cachedHost.IsCatchAll = isCatchAll
-			// Save Cache (30 Minutes - Server config rarely changes)
 			cache.DomainCache.Set(hostCacheKey, cachedHost, 30*time.Minute)
 		}
 
+		// Never overwrite live Catch-All status with cached data.
+		// Only use the cache for IsPostmasterBroken, which doesn't change per-email.
 		mu.Lock()
+		if hostCached {
+			analysis.IsPostmasterBroken = cachedHost.IsPostmasterBroken
+		} else {
+			analysis.IsPostmasterBroken = isBroken
+		}
+		analysis.IsCatchAll = isCatchAll // Always trust the live probe
 		analysis.SmtpStatus = status
 		analysis.TimingDeltaMs = delta
-		analysis.IsCatchAll = isCatchAll // Trust current probe
 		mu.Unlock()
 	}()
 
-	// --- Collector C: Probes & History (Fully Concurrent) ---
+	// --- Collector C: Probes & History ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Printf("[DEBUG] Collector C (Probes) STARTED for %s", email)
-		defer log.Printf("[DEBUG] Collector C (Probes) DONE for %s", email)
 
+		var hasGCal, hasTeams, hasSharePoint, hasAdobe, hasGravatar, hasGitHub bool
+		var breachCount int
 		var probeWg sync.WaitGroup
 
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			res := lookup.CheckGoogleCalendar(ctx, email)
-			mu.Lock()
-			analysis.HasGoogleCalendar = res
-			mu.Unlock()
+			if lookup.CheckGoogleCalendar(ctx, email) {
+				mu.Lock()
+				hasGCal = true
+				mu.Unlock()
+			}
 		}()
 
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			res := lookup.CheckTeamsPresence(ctx, email, domain)
-			mu.Lock()
-			analysis.HasTeamsPresence = res
-			mu.Unlock()
+			if lookup.CheckTeamsPresence(ctx, email, domain) {
+				mu.Lock()
+				hasTeams = true
+				mu.Unlock()
+			}
 		}()
 
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			res := lookup.CheckSharePoint(ctx, email)
-			mu.Lock()
-			analysis.HasSharePoint = res
-			mu.Unlock()
+			if lookup.CheckSharePoint(ctx, email) {
+				mu.Lock()
+				hasSharePoint = true
+				mu.Unlock()
+			}
 		}()
 
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			res := lookup.CheckAdobe(ctx, email)
-			mu.Lock()
-			analysis.HasAdobe = res
-			mu.Unlock()
+			if lookup.CheckAdobe(ctx, email) {
+				mu.Lock()
+				hasAdobe = true
+				mu.Unlock()
+			}
 		}()
 
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			res := lookup.CheckGravatar(ctx, email)
-			mu.Lock()
-			analysis.HasGravatar = res
-			mu.Unlock()
+			if lookup.CheckGravatar(ctx, email) {
+				mu.Lock()
+				hasGravatar = true
+				mu.Unlock()
+			}
 		}()
 
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			res := lookup.CheckGitHub(ctx, email)
-			mu.Lock()
-			analysis.HasGitHub = res
-			mu.Unlock()
+			if lookup.CheckGitHub(ctx, email) {
+				mu.Lock()
+				hasGitHub = true
+				mu.Unlock()
+			}
 		}()
 
 		apiKey := os.Getenv("HIBP_API_KEY")
@@ -261,32 +244,62 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			probeWg.Add(1)
 			go func() {
 				defer probeWg.Done()
-				res := lookup.CheckHIBP(ctx, email, apiKey)
+				bc := lookup.CheckHIBP(ctx, email, apiKey)
 				mu.Lock()
-				analysis.BreachCount = res
+				breachCount = bc
 				mu.Unlock()
 			}()
 		}
 
-		// Wait for all sub-probes to finish
-		probeWg.Wait()
+		// Context-Aware WaitGroup for OSINT probes
+		c := make(chan struct{})
+		go func() {
+			defer close(c)
+			probeWg.Wait()
+		}()
+
+		select {
+		case <-c:
+			mu.Lock()
+			analysis.HasGoogleCalendar = hasGCal
+			analysis.HasTeamsPresence = hasTeams
+			analysis.HasSharePoint = hasSharePoint
+			analysis.HasAdobe = hasAdobe
+			analysis.HasGravatar = hasGravatar
+			analysis.HasGitHub = hasGitHub
+			analysis.BreachCount = breachCount
+			mu.Unlock()
+		case <-ctx.Done():
+			// Safely abort if the worker context expires
+			return
+		}
 	}()
 
-	wg.Wait()
+	// Context-Aware WaitGroup for the main collectors
+	c := make(chan struct{})
+	go func() {
+		defer close(c)
+		wg.Wait()
+	}()
 
-	finalScore, breakdown, reachability, status := CalculateRobustScore(analysis)
+	select {
+	case <-c:
+		finalScore, breakdown, reachability, status := CalculateRobustScore(analysis)
+		result.Score = finalScore
+		result.ScoreBreakdown = breakdown
+		result.Reachability = reachability
+		result.Status = status
+		result.Analysis = analysis
+		if result.Score == 0 && result.Status == models.StatusUnknown {
+			result.Error = "Connection failed or no signals found"
+		}
+		return result, nil
 
-	result.Score = finalScore
-	result.ScoreBreakdown = breakdown
-	result.Reachability = reachability
-	result.Status = status
-	result.Analysis = analysis
-
-	if result.Score == 0 && result.Status == models.StatusUnknown {
-		result.Error = "Connection failed or no signals found"
+	case <-ctx.Done():
+		result.Status = models.StatusUnknown
+		result.Error = "Validation timed out due to slow proxy or unresponsive server"
+		return result, ctx.Err()
 	}
-
-	return result, nil
 }
 
 func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, int64, bool) {
@@ -297,8 +310,6 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	var targetTime, ghostTime time.Duration
 	var targetErr, ghostErr error
 
-	// Local Micro-Retry Loop
-	// If the proxy IP gets temporarily rate-limited by the MX server, we back off and try again.
 	for attempt := 1; attempt <= 2; attempt++ {
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -313,23 +324,38 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 			ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail)
 		}()
 
-		wg.Wait()
+		// Context-Aware WaitGroup for SMTP network calls
+		c := make(chan struct{})
+		go func() {
+			defer close(c)
+			wg.Wait()
+		}()
+
+		select {
+		case <-c:
+			// Normal completion
+		case <-ctx.Done():
+			return 0, 0, false
+		}
 
 		targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
 		ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
 
-		// If we got a definitive answer from both probes (or a clean 550 bounce), break the loop
 		if !targetTransient && !ghostTransient {
 			break
 		}
 
-		// If we hit a transient error on attempt 1, pause for 2 seconds and retry
 		if attempt == 1 {
 			log.Printf("[DEBUG] Transient error via proxy for %s, retrying...", email)
-			time.Sleep(2 * time.Second)
+			// Context-aware sleep. If the timeout fires during the 2-second pause
+			// we abort instantly rather than burning the remaining deadline.
+			select {
+			case <-time.After(2 * time.Second):
+				// Sleep finished, proceed to attempt 2
+			case <-ctx.Done():
+				return 0, 0, false
+			}
 		}
-
-		// If attempt 2 also fails, we will accept the Unknown status below.
 	}
 
 	delta := int64(0)
@@ -338,7 +364,6 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 		delta = int64(math.Abs(d))
 	}
 
-	// If the proxy is completely blocked and both attempts failed, fail safely
 	targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
 	ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
 
@@ -352,9 +377,9 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	ghostHardBounced := !ghostValid && lookup.IsNoSuchUserError(ghostErr)
 
 	if ghostHardBounced && targetValid {
-		status = 250 // Valid
+		status = 250
 	} else if !targetValid && lookup.IsNoSuchUserError(targetErr) {
-		status = 550 // Invalid
+		status = 550
 	} else if targetValid {
 		status = 0
 		isCatchAll = true
