@@ -12,7 +12,7 @@ services:
       - PROXY_LIST=${PROXY_LIST}
       - API_SECRET_KEY=${API_SECRET_KEY}
       - PROXY_CONCURRENCY=5
-      - SMTP_PROXY_ENABLED=true
+      - SMTP_PROXY_ENABLED=false
     depends_on:
       - redis
       - postgres
@@ -33,7 +33,7 @@ services:
       - PROXY_LIST=${PROXY_LIST}
       - WORKER_CONCURRENCY=50
       - PROXY_CONCURRENCY=5
-      - SMTP_PROXY_ENABLED=true
+      - SMTP_PROXY_ENABLED=false
     networks:
       - mv-net
     depends_on:
