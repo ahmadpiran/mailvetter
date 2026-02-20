@@ -37,13 +37,9 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		breakdown["base_smtp_valid"] = 90.0
 		status = models.StatusValid
 	} else if analysis.SmtpStatus == 550 {
-		if analysis.IsPostmasterBroken {
-			score = 40.0
-			breakdown["base_server_broken"] = 40.0
-			status = models.StatusUnknown
-		} else {
-			return 0, map[string]float64{"base_hard_bounce": 0}, models.ReachabilityBad, models.StatusInvalid
-		}
+		// THE FIX: If the server explicitly says the user doesn't exist, we believe it.
+		// We no longer rescue it even if IsPostmasterBroken is true.
+		return 0, map[string]float64{"base_hard_bounce": 0}, models.ReachabilityBad, models.StatusInvalid
 	} else if analysis.IsCatchAll {
 		score = 30.0
 		breakdown["base_catch_all"] = 30.0
@@ -115,12 +111,12 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		breakdown["p2_dmarc"] = WeightDMARC
 	}
 
-	if analysis.TimingDeltaMs > 600 {
-		score += 9.8
-		breakdown["p2_timing_strong"] = 9.8
-	} else if analysis.TimingDeltaMs > 300 {
-		score += 5.6
-		breakdown["p2_timing_weak"] = 5.6
+	if analysis.TimingDeltaMs > 3000 {
+		score += 50.0
+		breakdown["p2_timing_strong"] = 50.0
+	} else if analysis.TimingDeltaMs > 1500 {
+		score += 25.0
+		breakdown["p2_timing_weak"] = 25.0
 	}
 
 	// 3. PENALTIES
@@ -138,20 +134,14 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	}
 
 	// 4. O365 ZOMBIE PENALTY
-	if analysis.MxProvider == "office365" && (analysis.SmtpStatus == 250 || analysis.IsCatchAll) {
+	// THE FIX: We only apply this penalty if the domain is a Catch-All.
+	// If it explicitly rejected the ghost email, the 250 OK is trustworthy.
+	if analysis.MxProvider == "office365" && analysis.IsCatchAll {
 		if !analysis.HasTeamsPresence && !analysis.HasSharePoint {
-			if analysis.SmtpStatus == 250 {
-				score -= 60.0
-				breakdown["correction_o365_false_positive"] = -60.0
-			}
 			score -= 30.0
 			breakdown["penalty_o365_ghost"] = -30.0
 			status = models.StatusCatchAll
 		} else if analysis.HasTeamsPresence && !analysis.HasSharePoint {
-			if analysis.SmtpStatus == 250 {
-				score -= 60.0
-				breakdown["correction_o365_false_positive"] = -60.0
-			}
 			score -= 20.0
 			breakdown["penalty_o365_unlicensed"] = -20.0
 			status = models.StatusCatchAll
