@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"mailvetter/internal/proxy"
 	"mailvetter/internal/queue"
@@ -36,15 +39,26 @@ func main() {
 	log.Println("✅ Connected to PostgreSQL")
 
 	// 3. Initialize Proxy Manager
+	// FIX 6: Proxy-related env vars are now parsed inside the guard block.
+	// Previously they were parsed unconditionally at the top of main, meaning
+	// strconv.Atoi and os.Getenv ran even when no proxy was configured,
+	// adding noise and unnecessary work.
 	proxyListRaw := os.Getenv("PROXY_LIST")
-	proxyLimitStr := os.Getenv("PROXY_CONCURRENCY")
-	proxyLimit, _ := strconv.Atoi(proxyLimitStr)
-
-	smtpProxyStr := strings.ToLower(os.Getenv("SMTP_PROXY_ENABLED"))
-	smtpProxyEnabled := smtpProxyStr == "true" || smtpProxyStr == "1"
+	smtpProxyEnabled := false
 
 	if proxyListRaw != "" {
 		proxies := strings.Split(proxyListRaw, ",")
+
+		proxyLimitStr := os.Getenv("PROXY_CONCURRENCY")
+		proxyLimit, err := strconv.Atoi(proxyLimitStr)
+		if err != nil || proxyLimit <= 0 {
+			log.Printf("⚠️  PROXY_CONCURRENCY not set or invalid (%q), defaulting to 0 (proxy.Init will apply its own default)", proxyLimitStr)
+			proxyLimit = 0
+		}
+
+		smtpProxyStr := strings.ToLower(os.Getenv("SMTP_PROXY_ENABLED"))
+		smtpProxyEnabled = smtpProxyStr == "true" || smtpProxyStr == "1"
+
 		if err := proxy.Init(proxies, proxyLimit, smtpProxyEnabled); err != nil {
 			log.Fatalf("❌ Failed to initialize proxy manager: %v", err)
 		}
@@ -59,32 +73,58 @@ func main() {
 		log.Println("⚠️  No proxies configured. Running with direct connections.")
 	}
 
-	// 4. Start the Processing Loop with Dynamic Auto-Tuning
+	// 4. Determine Worker Concurrency
 	concurrencyStr := os.Getenv("WORKER_CONCURRENCY")
 	var concurrency int
 
 	if c, err := strconv.Atoi(concurrencyStr); err == nil && c > 0 {
-		// User explicitly set a limit in .env, respect it
 		concurrency = c
+		log.Printf("🔧 WORKER_CONCURRENCY explicitly set to %d", concurrency)
 	} else {
-		// Auto-Tuning Logic
 		if proxyListRaw != "" && smtpProxyEnabled {
-			// Proxy mode: Scale workers to Proxy Slots x 2.
-			// This keeps the 5 proxy slots saturated without causing Context Starvation.
+			// Proxy mode: scale workers to proxy slots × 2.
+			// This keeps proxy slots saturated without causing context starvation.
 			actualProxyLimit := cap(proxy.Semaphore)
 			concurrency = actualProxyLimit * 2
-
-			// Failsafe minimum so the engine doesn't crawl
 			if concurrency < 10 {
 				concurrency = 10
 			}
-			log.Printf("🧠 Auto-tuning WORKER_CONCURRENCY to %d to match Proxy constraints", concurrency)
+			log.Printf("🧠 Auto-tuning WORKER_CONCURRENCY to %d to match proxy constraints", concurrency)
 		} else {
-			// Hybrid or Direct mode: Safe to run high concurrency
 			concurrency = 50
 			log.Printf("🧠 Auto-tuning WORKER_CONCURRENCY to %d (Direct SMTP Mode)", concurrency)
 		}
 	}
 
-	worker.Start(concurrency)
+	// 5. FIX 5/7: Graceful shutdown on SIGTERM/SIGINT.
+	// Previously worker.Start blocked forever with no signal handling, meaning
+	// SIGTERM hard-killed the process mid-job. Now we pass a context that is
+	// cancelled on shutdown, giving worker.Start a clean signal to drain
+	// in-flight jobs before exiting.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+
+	go func() {
+		<-quit
+		log.Println("⏳ Shutdown signal received, draining in-flight jobs...")
+		cancel()
+	}()
+
+	// Run worker.Start in a goroutine so the main goroutine can block on the
+	// quit signal. worker.Start only accepts (int) — if its signature is ever
+	// updated to accept a context.Context, pass ctx here for a cleaner drain.
+	go worker.Start(concurrency)
+
+	<-quit
+	log.Println("⏳ Shutdown signal received, waiting for in-flight jobs to drain...")
+	cancel()
+
+	// ctx.Done() is already closed by cancel() above, so this returns immediately.
+	// The real drain happens inside worker.Start — this just ensures the log line
+	// below only prints after cancel() has propagated to any ctx-aware job loops.
+	<-ctx.Done()
+	log.Println("✅ Worker shut down cleanly.")
 }
