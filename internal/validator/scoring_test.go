@@ -49,10 +49,25 @@ func TestCalculateRobustScore(t *testing.T) {
 				HasSharePoint:    false,
 			},
 			// Base (30) - Zombie Penalty (30) = 0
+			// Empty CatchAll penalty is skipped for O365 so we don't double-penalize.
 			expectedScoreMin: 0,
 			expectedScoreMax: 10,
 			expectedReach:    models.ReachabilityBad,
 			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			name: "O365 Catch-All Upgraded to Valid by Absolute Proof",
+			input: models.RiskAnalysis{
+				IsCatchAll:       true, // Base: 30
+				MxProvider:       "office365",
+				HasTeamsPresence: true, // Absolute Proof! (+15 score)
+			},
+			// Base(30) + Teams(15) + CatchAll Strong Boost(50) = 95
+			// The O365 exclusion was removed, so this is now successfully upgraded to Valid.
+			expectedScoreMin: 90,
+			expectedScoreMax: 99,
+			expectedReach:    models.ReachabilitySafe,
+			expectedStatus:   models.StatusValid,
 		},
 		{
 			name: "Absolute Proof Overrides Penalties",
@@ -79,11 +94,11 @@ func TestCalculateRobustScore(t *testing.T) {
 				DomainAgeDays:    5,     // New domain (Penalty bypassed by soft proof)
 				HasTeamsPresence: false, // Would normally trigger -30 O365 Zombie penalty
 			},
-			// Base(30) + GitHub(12) = 42
-			// Both the New Domain penalty (-50) and O365 Zombie penalty (-30) are safely bypassed!
-			expectedScoreMin: 40,
-			expectedScoreMax: 50,
-			expectedReach:    models.ReachabilityBad,
+			// Base(30) + GitHub(12) + Medium CatchAll Boost(25) = 67
+			// The New Domain penalty (-50) and O365 Zombie penalty (-30) are safely bypassed.
+			expectedScoreMin: 60,
+			expectedScoreMax: 70,
+			expectedReach:    models.ReachabilityRisky,
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{
@@ -94,8 +109,6 @@ func TestCalculateRobustScore(t *testing.T) {
 				TimingDeltaMs: 2000, // Weak Timing (+25 score) - INTENTIONALLY NOT A SOFT PROOF SHIELD
 			},
 			// Base(30) + Weak Timing(25) - Empty CatchAll Penalty(-20) = 35
-			// Claude's logic deliberately exposes weak timing to the empty catch-all penalty
-			// to balance out noisy SOCKS5 proxy jitter.
 			expectedScoreMin: 30,
 			expectedScoreMax: 40,
 			expectedReach:    models.ReachabilityBad,
