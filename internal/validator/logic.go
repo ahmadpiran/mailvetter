@@ -134,9 +134,13 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			cachedHost.IsPostmasterBroken = isBroken
 		}
 
+		if !hostCached {
+			time.Sleep(500 * time.Millisecond)
+		}
+
 		status, delta, isCatchAll := runSmtpProbes(ctx, email, domain, primaryMX)
 
-		// FIX: Use a context-aware sleep so a tight deadline isn't held up for
+		// Use a context-aware sleep so a tight deadline isn't held up for
 		// 250ms waiting on a jitter re-probe that will be discarded anyway.
 		// If the context expires during the pause we proceed with the values we
 		// already have rather than blocking or returning empty results.
@@ -339,6 +343,8 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	if !targetValid && lookup.IsNoSuchUserError(targetErr) {
 		return 550, 0, false
 	}
+
+	time.Sleep(500 * time.Millisecond)
 
 	// 2. Run Ghost Probe ONLY if Target was Valid (Checking for Catch-All)
 	randomUser := generateRandomString(12)

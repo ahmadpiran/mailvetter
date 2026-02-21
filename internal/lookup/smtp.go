@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"mailvetter/internal/proxy"
 	"net"
-	"net/smtp"
 	"net/textproto"
 	"strings"
 	"time"
@@ -87,16 +86,10 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 	}
 	conn.SetDeadline(deadline)
 
-	client, err := smtp.NewClient(conn, mxHost)
-	if err != nil {
-		conn.Close()
-		return false, 0, fmt.Errorf("client handshake failed: %w", err)
-	}
-	defer client.Close()
+	// NEW: Use textproto directly instead of smtp.NewClient!
+	tp := textproto.NewConn(conn)
+	defer tp.Close()
 
-	// 3. Smart Delay Helper (Context-Aware)
-	// Mimics human typing speed for strict firewalls but aborts immediately
-	// if the worker context is cancelled.
 	smartDelay := func() error {
 		if !isStrictEnterprise {
 			return nil
@@ -109,33 +102,54 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		}
 	}
 
-	// --- Execute Adaptive SMTP Commands ---
+	// 1. Read 220 Welcome Banner
+	if _, _, err := tp.ReadResponse(220); err != nil {
+		return false, time.Since(start), fmt.Errorf("banner timeout/rejected: %w", err)
+	}
 
+	// 2. Send HELO directly (bypassing EHLO localhost)
 	if err := smartDelay(); err != nil {
 		return false, time.Since(start), err
 	}
-	if err = client.Hello(HeloHost); err != nil {
-		return false, time.Since(start), fmt.Errorf("HELO failed: %w", err)
+	if _, err := tp.Cmd("HELO %s", HeloHost); err != nil {
+		return false, time.Since(start), err
+	}
+	if _, _, err := tp.ReadResponse(250); err != nil {
+		return false, time.Since(start), fmt.Errorf("HELO rejected: %w", err)
 	}
 
+	// 3. Send MAIL FROM
 	if err := smartDelay(); err != nil {
 		return false, time.Since(start), err
 	}
-	if err = client.Mail(MailFrom); err != nil {
-		return false, time.Since(start), fmt.Errorf("MAIL FROM failed: %w", err)
+	if _, err := tp.Cmd("MAIL FROM:<%s>", MailFrom); err != nil {
+		return false, time.Since(start), err
+	}
+	if _, _, err := tp.ReadResponse(250); err != nil {
+		return false, time.Since(start), fmt.Errorf("MAIL FROM rejected: %w", err)
 	}
 
+	// 4. Send RCPT TO
 	if err := smartDelay(); err != nil {
 		return false, time.Since(start), err
 	}
-	err = client.Rcpt(targetEmail)
+	if _, err := tp.Cmd("RCPT TO:<%s>", targetEmail); err != nil {
+		return false, time.Since(start), err
+	}
+
+	// Wait for 250 (Valid) or 251 (Forwarded). If it's a 550, textproto returns it as an error!
+	code, _, err := tp.ReadResponse(25)
 	elapsed := time.Since(start)
+
+	tp.Cmd("QUIT")
 
 	if err != nil {
 		return false, elapsed, err
 	}
+	if code != 250 && code != 251 {
+		return false, elapsed, fmt.Errorf("RCPT rejected with code %d", code)
+	}
 
-	_ = client.Quit()
 	return true, elapsed, nil
 }
 
