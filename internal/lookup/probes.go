@@ -217,7 +217,7 @@ func CheckMicrosoftLogin(ctx context.Context, email string) bool {
 	// that bypasses Catch-Alls and is not heavily rate-limited.
 	targetURL := fmt.Sprintf("https://outlook.office365.com/autodiscover/autodiscover.json?Email=%s&Protocol=Autodiscoverv1", url.QueryEscape(email))
 
-	// FIX: We MUST use a custom HTTP client to PREVENT following redirects.
+	// We MUST use a custom HTTP client to PREVENT following redirects.
 	// A valid user returns 200 OK. An invalid user returns a 302 Redirect.
 	// If we follow the redirect, it breaks the logic.
 	client := &http.Client{
