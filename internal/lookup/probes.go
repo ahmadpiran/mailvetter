@@ -118,15 +118,13 @@ func CheckGoogleCalendar(ctx context.Context, email string) bool {
 
 // CheckSharePoint probes the user's personal OneDrive/SharePoint URL.
 // A 401 or 403 response indicates the personal site exists but requires auth.
+// CheckSharePoint probes the user's personal OneDrive/SharePoint URL.
 func CheckSharePoint(ctx context.Context, email string) bool {
 	parts := strings.Split(email, "@")
 	if len(parts) != 2 {
 		return false
 	}
 
-	// Microsoft strictly replaces dots and hyphens in the local-part
-	// with underscores for SharePoint URLs.
-	// "anirudh.kataruka" MUST become "anirudh_kataruka"
 	user := strings.ReplaceAll(parts[0], ".", "_")
 	user = strings.ReplaceAll(user, "-", "_")
 	domain := parts[1]
@@ -139,9 +137,17 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 	baseTenant := domainParts[0]
 	userPath := fmt.Sprintf("%s_%s", user, strings.ReplaceAll(domain, ".", "_"))
 
-	// Microsoft sometimes uses the base domain, or strips the TLD completely.
-	// We'll use the standard baseTenant format.
 	url := fmt.Sprintf("https://%s-my.sharepoint.com/personal/%s", baseTenant, userPath)
+
+	// We MUST use a custom client to TRAP the 302 Redirect.
+	// If we follow it to the AccessDenied page, we lose the signal.
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse // Stop immediately on 302!
+		},
+		Transport: sharedClient.Transport,
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -149,15 +155,26 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := DoProxiedRequest(req)
+	// Route through your proxy manager if enabled
+	if proxy.Enabled() {
+		select {
+		case proxy.Semaphore <- struct{}{}:
+		case <-ctx.Done():
+			return false
+		}
+		defer func() { <-proxy.Semaphore }()
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
 
-	// 403/401 means the tenant and user exist, but it's private.
-	// 200 means it's public. 404 means the user does not exist.
-	return resp.StatusCode == 403 || resp.StatusCode == 401 || resp.StatusCode == 200
+	// 403/401 = Exists but protected
+	// 200 = Exists and public
+	// 302 = Redirects to AccessDenied.aspx (Absolute Proof!)
+	return resp.StatusCode == 403 || resp.StatusCode == 401 || resp.StatusCode == 200 || resp.StatusCode == 302
 }
 
 // --- SOCIAL PROBES ---
