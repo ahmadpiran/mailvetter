@@ -303,49 +303,22 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 }
 
 func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, int64, bool) {
-	randomUser := generateRandomString(12)
-	ghostEmail := randomUser + "@" + domain
+	var targetValid bool
+	var targetTime time.Duration
+	var targetErr error
 
-	var targetValid, ghostValid bool
-	var targetTime, ghostTime time.Duration
-	var targetErr, ghostErr error
-
+	// 1. Run Target Probe FIRST
 	for attempt := 1; attempt <= 2; attempt++ {
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			targetValid, targetTime, targetErr = lookup.CheckSMTP(ctx, primaryMX, email)
-		}()
-
-		go func() {
-			defer wg.Done()
-			ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail)
-		}()
-
-		c := make(chan struct{})
-		go func() {
-			defer close(c)
-			wg.Wait()
-		}()
-
-		select {
-		case <-c:
-		case <-ctx.Done():
-			return 0, 0, false
-		}
+		targetValid, targetTime, targetErr = lookup.CheckSMTP(ctx, primaryMX, email)
 
 		targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
-		ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
 
-		// FIX 3: If target succeeded, don't abort just because the ghost got rate-limited
-		if !targetTransient && (!ghostTransient || targetValid) {
-			break
+		if !targetTransient {
+			break // Success or Hard Bounce! We can stop retrying.
 		}
 
 		if attempt == 1 {
-			log.Printf("[DEBUG] Transient error via proxy for %s, retrying...", email)
+			log.Printf("[DEBUG] Transient error via proxy for TARGET %s, retrying...", email)
 			select {
 			case <-time.After(2 * time.Second):
 			case <-ctx.Done():
@@ -354,25 +327,61 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 		}
 	}
 
+	targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
+
+	// If the target completely timed out or had a transient error we couldn't recover from:
+	if targetTransient {
+		return 0, 0, false
+	}
+
+	// If Target is a Hard Bounce, return immediately!
+	// No need to waste proxy bandwidth or risk rate limits with a Ghost probe.
+	if !targetValid && lookup.IsNoSuchUserError(targetErr) {
+		return 550, 0, false
+	}
+
+	// 2. Run Ghost Probe ONLY if Target was Valid (Checking for Catch-All)
+	randomUser := generateRandomString(12)
+	ghostEmail := randomUser + "@" + domain
+
+	var ghostValid bool
+	var ghostTime time.Duration
+	var ghostErr error
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail)
+
+		ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
+
+		if !ghostTransient {
+			break
+		}
+
+		if attempt == 1 {
+			log.Printf("[DEBUG] Transient error via proxy for GHOST %s, retrying...", ghostEmail)
+			select {
+			case <-time.After(2 * time.Second):
+			case <-ctx.Done():
+				return 0, 0, false
+			}
+		}
+	}
+
+	// Calculate timing delta. Even though probes are sequential now, tarpitting delays
+	// (e.g. server intentionally sleeping 5s before replying) will still be captured here.
 	delta := int64(0)
 	if ghostTime > 0 && targetTime > 0 {
 		d := float64(ghostTime.Milliseconds()) - float64(targetTime.Milliseconds())
 		delta = int64(math.Abs(d))
 	}
 
-	targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
+	ghostHardBounced := !ghostValid && lookup.IsNoSuchUserError(ghostErr)
 	ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
-
-	// FIX 4: Only fail completely if the TARGET is the one that timed out.
-	if targetTransient {
-		return 0, 0, false
-	}
 
 	status := 0
 	isCatchAll := false
 
-	ghostHardBounced := !ghostValid && lookup.IsNoSuchUserError(ghostErr)
-
+	// Evaluate final status
 	if targetValid {
 		if ghostHardBounced {
 			status = 250 // Target OK, Ghost Dead = Confirmed Valid
@@ -380,11 +389,10 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 			status = 0
 			isCatchAll = true // Target OK, Ghost OK = Catch-All
 		} else if ghostTransient {
-			// FIX 5: Target OK, but Ghost dropped the connection. Optimistically assume valid.
+			// Target OK, but Ghost dropped the connection or rate-limited us.
+			// Optimistically assume valid rather than penalizing the valid target.
 			status = 250
 		}
-	} else if lookup.IsNoSuchUserError(targetErr) {
-		status = 550
 	}
 
 	return status, delta, isCatchAll
