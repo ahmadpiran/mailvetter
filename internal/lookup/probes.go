@@ -207,14 +207,27 @@ type MicrosoftCredentialResponse struct {
 
 func CheckMicrosoftLogin(ctx context.Context, email string) bool {
 	url := "https://login.microsoftonline.com/common/GetCredentialType"
-	payload := map[string]string{"username": email}
+
+	// Microsoft requires 'Username' capitalized and specific auth flags
+	// to prevent rejecting the request as a bot.
+	payload := map[string]interface{}{
+		"Username":             email,
+		"isOtherIdpSupported":  true,
+		"checkPhones":          false,
+		"isRemoteNGCSupported": true,
+		"isCookieBannerShown":  false,
+		"isFidoSupported":      true,
+		"forceotclogin":        false,
+	}
 	jsonPayload, _ := json.Marshal(payload)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return false
 	}
-	req.Header.Set("Content-Type", "application/json")
+
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
 	resp, err := DoProxiedRequest(req)
@@ -222,13 +235,20 @@ func CheckMicrosoftLogin(ctx context.Context, email string) bool {
 		return false
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != 200 {
 		return false
 	}
 
-	var result MicrosoftCredentialResponse
+	var result struct {
+		IfExistsResult int `json:"IfExistsResult"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return false
 	}
-	return result.IfExistsResult == 0
+
+	// 0 = Exists in Tenant
+	// 5 = Exists (Personal Microsoft Account)
+	// 6 = Exists (Federated/Other Tenant)
+	return result.IfExistsResult == 0 || result.IfExistsResult == 5 || result.IfExistsResult == 6
 }

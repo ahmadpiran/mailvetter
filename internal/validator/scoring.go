@@ -173,25 +173,27 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	}
 
 	// 5. CATCH-ALL DISAMBIGUATION
-	// Note: TimingDeltaMs > 1500 qualifies as soft proof for score boosting
-	// here (via hasSoftProof in the previous version), but we intentionally
-	// keep it out of the penalty-shield hasSoftProof definition above.
-	// Inside this block it still contributes via hasAbsoluteProof (> 3000)
-	// and the timing booster already added in step 2 (> 1500).
-	if analysis.IsCatchAll && analysis.MxProvider != "office365" {
+	// FIX: Removed the Office365 exclusion. If an O365 email is hiding behind
+	// an Accept-All firewall, but we find Absolute Proof (like Teams presence),
+	// it MUST be upgraded to Valid.
+	if analysis.IsCatchAll {
 		if hasAbsoluteProof {
 			boost := 50.0
 			score += boost
 			breakdown["resolution_catchall_strong"] = boost
-			status = models.StatusValid
+			status = models.StatusValid // Upgrades Catch-All to Valid!
 		} else if hasSoftProof {
 			boost := 25.0
 			score += boost
 			breakdown["resolution_catchall_medium"] = boost
 		} else {
-			penalty := -20.0
-			score += penalty
-			breakdown["resolution_catchall_empty"] = penalty
+			// Apply the empty penalty only if it's NOT O365,
+			// because O365 already received the specific -30 Zombie penalty in Step 4.
+			if analysis.MxProvider != "office365" {
+				penalty := -20.0
+				score += penalty
+				breakdown["resolution_catchall_empty"] = penalty
+			}
 		}
 	}
 
