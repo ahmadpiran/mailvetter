@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -118,7 +119,6 @@ func CheckGoogleCalendar(ctx context.Context, email string) bool {
 
 // CheckSharePoint probes the user's personal OneDrive/SharePoint URL.
 // A 401 or 403 response indicates the personal site exists but requires auth.
-// CheckSharePoint probes the user's personal OneDrive/SharePoint URL.
 func CheckSharePoint(ctx context.Context, email string) bool {
 	parts := strings.Split(email, "@")
 	if len(parts) != 2 {
@@ -139,14 +139,14 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 
 	url := fmt.Sprintf("https://%s-my.sharepoint.com/personal/%s", baseTenant, userPath)
 
-	// We MUST use a custom client to TRAP the 302 Redirect.
-	// If we follow it to the AccessDenied page, we lose the signal.
+	// FIX 1: By NOT specifying a Transport, we bypass the proxy manager entirely.
+	// This forces the request to go out via the direct VPS IP, which we proved
+	// via curl is highly trusted by Microsoft.
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse // Stop immediately on 302!
+			return http.ErrUseLastResponse // Trap the 302 Redirect!
 		},
-		Transport: sharedClient.Transport,
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -155,21 +155,16 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 	}
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	// Route through your proxy manager if enabled
-	if proxy.Enabled() {
-		select {
-		case proxy.Semaphore <- struct{}{}:
-		case <-ctx.Done():
-			return false
-		}
-		defer func() { <-proxy.Semaphore }()
-	}
+	// FIX 2: Completely removed the proxy.Semaphore block here.
 
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("[DEBUG-OSINT] SharePoint HTTP Error for %s: %v", email, err)
 		return false
 	}
 	defer resp.Body.Close()
+
+	log.Printf("[DEBUG-OSINT] SharePoint returned Status %d for %s", resp.StatusCode, email)
 
 	// 403/401 = Exists but protected
 	// 200 = Exists and public
