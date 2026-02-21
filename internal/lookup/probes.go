@@ -124,12 +124,14 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 	if len(parts) != 2 {
 		return false
 	}
-	user := parts[0]
+
+	// Microsoft strictly replaces dots and hyphens in the local-part
+	// with underscores for SharePoint URLs.
+	// "anirudh.kataruka" MUST become "anirudh_kataruka"
+	user := strings.ReplaceAll(parts[0], ".", "_")
+	user = strings.ReplaceAll(user, "-", "_")
 	domain := parts[1]
 
-	// Guard against malformed single-segment domains (no dots).
-	// strings.Split(domain, ".")[0] on "localdomain" would silently produce
-	// a nonsensical SharePoint URL instead of failing cleanly.
 	domainParts := strings.Split(domain, ".")
 	if len(domainParts) < 2 {
 		return false
@@ -137,6 +139,9 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 
 	baseTenant := domainParts[0]
 	userPath := fmt.Sprintf("%s_%s", user, strings.ReplaceAll(domain, ".", "_"))
+
+	// Microsoft sometimes uses the base domain, or strips the TLD completely.
+	// We'll use the standard baseTenant format.
 	url := fmt.Sprintf("https://%s-my.sharepoint.com/personal/%s", baseTenant, userPath)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -150,6 +155,9 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 		return false
 	}
 	defer resp.Body.Close()
+
+	// 403/401 means the tenant and user exist, but it's private.
+	// 200 means it's public. 404 means the user does not exist.
 	return resp.StatusCode == 403 || resp.StatusCode == 401 || resp.StatusCode == 200
 }
 
