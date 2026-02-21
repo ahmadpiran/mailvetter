@@ -322,7 +322,8 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 		}
 
 		if attempt == 1 {
-			log.Printf("[DEBUG] Transient error via proxy for TARGET %s, retrying...", email)
+			// Actually print the targetErr so we can see why it failed!
+			log.Printf("[DEBUG] Transient error via proxy for TARGET %s, retrying... Error: %v", email, targetErr)
 			select {
 			case <-time.After(2 * time.Second):
 			case <-ctx.Done():
@@ -341,6 +342,8 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	// If Target is a Hard Bounce, return immediately!
 	// No need to waste proxy bandwidth or risk rate limits with a Ghost probe.
 	if !targetValid && lookup.IsNoSuchUserError(targetErr) {
+		// Log the final failure reason
+		log.Printf("[ERROR] Final target transient failure for %s: %v", email, targetErr)
 		return 550, 0, false
 	}
 

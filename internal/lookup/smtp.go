@@ -37,7 +37,7 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		conn, err = proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
 	} else {
 		d := net.Dialer{Timeout: 10 * time.Second}
-		conn, err = d.DialContext(ctx, "tcp", mxHost+":25")
+		conn, err = d.DialContext(ctx, "tcp4", mxHost+":25")
 	}
 
 	if err != nil {
@@ -137,20 +137,24 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		return false, time.Since(start), err
 	}
 
-	// Wait for 250 (Valid) or 251 (Forwarded). If it's a 550, textproto returns it as an error!
-	code, _, err := tp.ReadResponse(25)
+	// Read ANY response (0) instead of expecting exactly 25.
+	code, msg, err := tp.ReadResponse(0)
 	elapsed := time.Since(start)
 
 	tp.Cmd("QUIT")
 
 	if err != nil {
-		return false, elapsed, err
-	}
-	if code != 250 && code != 251 {
-		return false, elapsed, fmt.Errorf("RCPT rejected with code %d", code)
+		return false, elapsed, fmt.Errorf("network read error: %w", err)
 	}
 
-	return true, elapsed, nil
+	// Manually check for success codes (250 OK or 251 Forwarded)
+	if code == 250 || code == 251 {
+		return true, elapsed, nil
+	}
+
+	// If the server rejected the email (5xx or 4xx), package the error
+	// so IsNoSuchUserError can read it properly!
+	return false, elapsed, &textproto.Error{Code: code, Msg: msg}
 }
 
 // CheckPostmaster verifies if the domain accepts emails to postmaster.
