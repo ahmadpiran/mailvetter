@@ -20,11 +20,10 @@ const (
 // Prevents the VPS IP from being banned by Google/Outlook for opening too many concurrent connections.
 var SMTPSemaphore = make(chan struct{}, 15)
 
-// CheckSMTP performs a standard probe via direct or proxy connection.
+// CheckSMTP performs a standard probe via direct or proxy connection,
+// with adaptive protocol speeds to bypass enterprise tarpits.
 func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, time.Duration, error) {
 	// Semaphore acquisition is now context-aware.
-	// Previously this blocked unconditionally, meaning a caller with an expired
-	// context would still sit here waiting for a free slot.
 	select {
 	case SMTPSemaphore <- struct{}{}:
 	case <-ctx.Done():
@@ -46,14 +45,43 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		return false, 0, fmt.Errorf("connection failed: %w", err)
 	}
 
-	// Start the timer HERE, after the SOCKS5 handshake is complete.
-	// This ensures our Catch-All delta measurement is mathematically pure.
 	start := time.Now()
 
-	// Respect the context deadline instead of always using a fixed wall-clock offset.
-	// If the caller's context expires in 2 seconds, a 12-second deadline is meaningless
-	// and causes the connection to block well past the point the caller has given up.
-	deadline := time.Now().Add(12 * time.Second)
+	// 1. Detect Strict Enterprise Gateways (SEGs)
+	mxLower := strings.ToLower(mxHost)
+	isStrictEnterprise := false
+
+	strictGateways := []string{
+		"mimecast.com",          // Mimecast
+		"pphosted.com",          // Proofpoint
+		"barracudanetworks.com", // Barracuda
+		"messagelabs.com",       // Symantec / Broadcom MessageLabs
+		"iphmx.com",             // Cisco IronPort
+		"trendmicro.com",        // Trend Micro
+		"trendmicro.eu",         // Trend Micro (EU)
+		"sophos.com",            // Sophos
+		"mailcontrol.com",       // Forcepoint / Websense
+		"mxlogic.net",           // McAfee / Trellix
+		"fireeye.com",           // FireEye
+		"mx.cloudflare.net",     // Cloudflare Area 1
+	}
+
+	for _, gw := range strictGateways {
+		if strings.Contains(mxLower, gw) {
+			isStrictEnterprise = true
+			break
+		}
+	}
+
+	// 2. Adjust connection deadline
+	// If we are artificially delaying commands, we need to give the connection
+	// more time to live so we don't accidentally time ourselves out.
+	deadlineOffset := 12 * time.Second
+	if isStrictEnterprise {
+		deadlineOffset = 16 * time.Second
+	}
+
+	deadline := time.Now().Add(deadlineOffset)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
@@ -66,14 +94,40 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 	}
 	defer client.Close()
 
+	// 3. Smart Delay Helper (Context-Aware)
+	// Mimics human typing speed for strict firewalls but aborts immediately
+	// if the worker context is cancelled.
+	smartDelay := func() error {
+		if !isStrictEnterprise {
+			return nil
+		}
+		select {
+		case <-time.After(1 * time.Second):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// --- Execute Adaptive SMTP Commands ---
+
+	if err := smartDelay(); err != nil {
+		return false, time.Since(start), err
+	}
 	if err = client.Hello(HeloHost); err != nil {
 		return false, time.Since(start), fmt.Errorf("HELO failed: %w", err)
 	}
 
+	if err := smartDelay(); err != nil {
+		return false, time.Since(start), err
+	}
 	if err = client.Mail(MailFrom); err != nil {
 		return false, time.Since(start), fmt.Errorf("MAIL FROM failed: %w", err)
 	}
 
+	if err := smartDelay(); err != nil {
+		return false, time.Since(start), err
+	}
 	err = client.Rcpt(targetEmail)
 	elapsed := time.Since(start)
 
