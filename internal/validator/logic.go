@@ -407,10 +407,23 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	return status, delta, isCatchAll
 }
 
-func generateRandomString(n int) string {
-	b := make([]byte, n/2)
+// generateRandomString creates a realistic fake human email.
+// Using words like "test", "bounce", or pure hex strings triggers enterprise
+// spam heuristics. By mimicking a standard corporate "first.last" format,
+// we bypass the edge firewall and force the server to do a real directory lookup.
+func generateRandomString(_ int) string {
+	firstNames := []string{"alex", "michael", "sarah", "david", "emma", "chris", "jessica", "matthew", "amanda", "daniel"}
+	lastNames := []string{"smith", "jones", "taylor", "brown", "williams", "wilson", "johnson", "davis", "miller", "martin"}
+
+	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {
-		return "ghostuser123"
+		return "michael.smith.99" // Safe fallback
 	}
-	return hex.EncodeToString(b)
+
+	fIdx := int(b[0]) % len(firstNames)
+	lIdx := int(b[1]) % len(lastNames)
+
+	// Creates a highly realistic email format: first.last.hex
+	// Example: david.taylor.a7@domain.com
+	return firstNames[fIdx] + "." + lastNames[lIdx] + "." + hex.EncodeToString(b[2:])
 }

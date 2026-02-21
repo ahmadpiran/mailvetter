@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -91,19 +90,10 @@ func CheckGoogleWorkspace(ctx context.Context, domain string) bool {
 
 // --- APP PROBES ---
 
-// CheckTeamsPresence checks SRV records for SIP federation (a domain-level signal)
-// then confirms user existence via the Microsoft login endpoint.
-// Note: SRV federation records are not exclusive to Teams — Skype for Business and
-// third-party UCaaS providers use the same records. This probe is best treated as
-// a corroborating signal rather than a definitive Teams confirmation.
+// CheckTeamsPresence verifies user existence via the Microsoft login endpoint.
+// We no longer require sipfederationtls SRV records, as modern O365 tenants
+// often omit them, which previously caused massive false negatives.
 func CheckTeamsPresence(ctx context.Context, email, domain string) bool {
-	_, addrs, err := net.LookupSRV("sipfederationtls", "tcp", domain)
-	if err != nil || len(addrs) == 0 {
-		_, addrs, err = net.LookupSRV("sip", "tls", domain)
-		if err != nil || len(addrs) == 0 {
-			return false
-		}
-	}
 	return CheckMicrosoftLogin(ctx, email)
 }
 
