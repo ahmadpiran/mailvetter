@@ -241,7 +241,15 @@ func IsNoSuchUserError(err error) bool {
 
 	errStr := strings.ToLower(err.Error())
 
-	// 1. SHIELD: Check for block/spam/policy keywords FIRST
+	// 1. ABSOLUTE PROOF OF INVALID USER (Check this FIRST!)
+	// 5.1.1 = standard missing user
+	// 5.1.0 = standard address rejected
+	// 5.4.1 = Office 365 specific "Recipient address rejected: Access denied"
+	if strings.Contains(errStr, "5.1.1") || strings.Contains(errStr, "5.1.0") || strings.Contains(errStr, "5.4.1") {
+		return true
+	}
+
+	// 2. SHIELD: Check for block/spam/policy keywords
 	// If the server explicitly says "blocked", it is a network error, NOT a missing user.
 	blockKeywords := []string{
 		"spam", "block", "banned", "blacklisted", "ip", "policy",
@@ -255,11 +263,6 @@ func IsNoSuchUserError(err error) bool {
 		if strings.Contains(errStr, kw) {
 			return false
 		}
-	}
-
-	// 2. Specific status codes explicitly indicating invalid user
-	if strings.Contains(errStr, "5.1.1") || strings.Contains(errStr, "5.1.0") {
-		return true
 	}
 
 	// 3. Keywords explicitly indicating missing user
