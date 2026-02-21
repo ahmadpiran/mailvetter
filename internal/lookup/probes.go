@@ -1,7 +1,6 @@
 package lookup
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/json"
@@ -214,49 +213,43 @@ type MicrosoftCredentialResponse struct {
 }
 
 func CheckMicrosoftLogin(ctx context.Context, email string) bool {
-	url := "https://login.microsoftonline.com/common/GetCredentialType"
+	// The Office 365 Autodiscover API is a highly reliable, unauthenticated endpoint
+	// that bypasses Catch-Alls and is not heavily rate-limited.
+	targetURL := fmt.Sprintf("https://outlook.office365.com/autodiscover/autodiscover.json?Email=%s&Protocol=Autodiscoverv1", url.QueryEscape(email))
 
-	// Microsoft requires 'Username' capitalized and specific auth flags
-	// to prevent rejecting the request as a bot.
-	payload := map[string]interface{}{
-		"Username":             email,
-		"isOtherIdpSupported":  true,
-		"checkPhones":          false,
-		"isRemoteNGCSupported": true,
-		"isCookieBannerShown":  false,
-		"isFidoSupported":      true,
-		"forceotclogin":        false,
+	// FIX: We MUST use a custom HTTP client to PREVENT following redirects.
+	// A valid user returns 200 OK. An invalid user returns a 302 Redirect.
+	// If we follow the redirect, it breaks the logic.
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse // Stop immediately on 302!
+		},
+		Transport: sharedClient.Transport,
 	}
-	jsonPayload, _ := json.Marshal(payload)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonPayload))
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return false
 	}
-
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := DoProxiedRequest(req)
+	// Route through your proxy manager if enabled
+	if proxy.Enabled() {
+		select {
+		case proxy.Semaphore <- struct{}{}:
+		case <-ctx.Done():
+			return false
+		}
+		defer func() { <-proxy.Semaphore }()
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		return false
-	}
-
-	var result struct {
-		IfExistsResult int `json:"IfExistsResult"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false
-	}
-
-	// 0 = Exists in Tenant
-	// 5 = Exists (Personal Microsoft Account)
-	// 6 = Exists (Federated/Other Tenant)
-	return result.IfExistsResult == 0 || result.IfExistsResult == 5 || result.IfExistsResult == 6
+	// 200 OK means Microsoft successfully resolved the exact mailbox.
+	return resp.StatusCode == 200
 }
