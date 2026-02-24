@@ -32,8 +32,6 @@ func TestCalculateRobustScore(t *testing.T) {
 				IsCatchAll:    true, // Base 30
 				MxProvider:    "google",
 				TimingDeltaMs: 50,
-				// Empty CatchAll Penalty: -20
-				// Result: 10
 			},
 			expectedScoreMin: 5,
 			expectedScoreMax: 20,
@@ -48,8 +46,6 @@ func TestCalculateRobustScore(t *testing.T) {
 				HasTeamsPresence: false,
 				HasSharePoint:    false,
 			},
-			// Base (30) - Zombie Penalty (30) = 0
-			// Empty CatchAll penalty is skipped for O365 so we don't double-penalize.
 			expectedScoreMin: 0,
 			expectedScoreMax: 10,
 			expectedReach:    models.ReachabilityBad,
@@ -62,8 +58,6 @@ func TestCalculateRobustScore(t *testing.T) {
 				MxProvider:       "office365",
 				HasTeamsPresence: true, // Absolute Proof! (+15 score)
 			},
-			// Base(30) + Teams(15) + CatchAll Strong Boost(50) = 95
-			// The O365 exclusion was removed, so this is now successfully upgraded to Valid.
 			expectedScoreMin: 90,
 			expectedScoreMax: 99,
 			expectedReach:    models.ReachabilitySafe,
@@ -78,8 +72,6 @@ func TestCalculateRobustScore(t *testing.T) {
 				EntropyScore:  0.9, // High entropy (Penalty bypassed by proof)
 				DomainAgeDays: 5,   // New domain (Penalty bypassed by proof)
 			},
-			// Base(30) + Breach(45) + Strong CatchAll(50) = 125 (clamped to 99)
-			// Status should be Valid, not CatchAll, and penalties should be completely ignored.
 			expectedScoreMin: 90,
 			expectedScoreMax: 99,
 			expectedReach:    models.ReachabilitySafe,
@@ -90,12 +82,10 @@ func TestCalculateRobustScore(t *testing.T) {
 			input: models.RiskAnalysis{
 				IsCatchAll:       true, // Base: 30
 				MxProvider:       "office365",
-				HasGitHub:        true,  // Soft Proof! (+12 score)
-				DomainAgeDays:    5,     // New domain (Penalty bypassed by soft proof)
-				HasTeamsPresence: false, // Would normally trigger -30 O365 Zombie penalty
+				HasGitHub:        true, // Soft Proof! (+12 score)
+				DomainAgeDays:    5,    // New domain (Penalty bypassed by soft proof)
+				HasTeamsPresence: false,
 			},
-			// Base(30) + GitHub(12) + Medium CatchAll Boost(25) = 67
-			// The New Domain penalty (-50) and O365 Zombie penalty (-30) are safely bypassed.
 			expectedScoreMin: 60,
 			expectedScoreMax: 70,
 			expectedReach:    models.ReachabilityRisky,
@@ -106,9 +96,8 @@ func TestCalculateRobustScore(t *testing.T) {
 			input: models.RiskAnalysis{
 				IsCatchAll:    true, // Base: 30
 				MxProvider:    "google",
-				TimingDeltaMs: 2000, // Weak Timing (+25 score) - INTENTIONALLY NOT A SOFT PROOF SHIELD
+				TimingDeltaMs: 2000,
 			},
-			// Base(30) + Weak Timing(25) - Empty CatchAll Penalty(-20) = 35
 			expectedScoreMin: 30,
 			expectedScoreMax: 40,
 			expectedReach:    models.ReachabilityBad,
@@ -131,11 +120,37 @@ func TestCalculateRobustScore(t *testing.T) {
 				SmtpStatus:         550,
 				IsPostmasterBroken: true,
 			},
-			// Expect an absolute 0 and Invalid status
 			expectedScoreMin: 0,
 			expectedScoreMax: 0,
 			expectedStatus:   models.StatusInvalid,
 			expectedReach:    models.ReachabilityBad,
+		},
+		{
+			name: "Unknown Domain Upgraded to Valid by Absolute Proof (Calendar)",
+			input: models.RiskAnalysis{
+				SmtpStatus:        0, // Base: 20
+				IsCatchAll:        false,
+				HasGoogleCalendar: true, // Absolute Proof! (+42.5)
+			},
+			// Base(20) + Calendar(42.5) + Strong Unknown Boost(50) = 112.5 (clamped to 99)
+			expectedScoreMin: 90,
+			expectedScoreMax: 99,
+			expectedReach:    models.ReachabilitySafe,
+			expectedStatus:   models.StatusValid,
+		},
+		{
+			name: "Unknown Domain with Soft Proof (GitHub + Adobe)",
+			input: models.RiskAnalysis{
+				SmtpStatus: 0, // Base: 20
+				IsCatchAll: false,
+				HasGitHub:  true, // Soft Proof! (+12)
+				HasAdobe:   true, // Soft Proof! (+18.5)
+			},
+			// Base(20) + GitHub(12) + Adobe(18.5) + Medium Unknown Boost(25) = 75.5 (rounds to 76)
+			expectedScoreMin: 70,
+			expectedScoreMax: 80,
+			expectedReach:    models.ReachabilityRisky,
+			expectedStatus:   models.StatusUnknown,
 		},
 	}
 

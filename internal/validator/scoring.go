@@ -5,7 +5,6 @@ import (
 	"math"
 )
 
-// Weights
 const (
 	WeightTeams      = 15.0
 	WeightSharePoint = 60.0
@@ -31,7 +30,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	var reachability models.Reachability
 	var status models.VerificationStatus
 
-	// 1. BASE SCORING
 	if analysis.SmtpStatus == 250 {
 		score = 90.0
 		breakdown["base_smtp_valid"] = 90.0
@@ -48,12 +46,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		status = models.StatusUnknown
 	}
 
-	// Define Proof Tiers early so they can shield against penalties.
-	//
-	// hasAbsoluteProof: signals that unambiguously confirm a real human inbox.
-	// Shields all heuristic penalties and the O365 zombie penalty.
-	// TimingDeltaMs > 3000 qualifies here because it represents a very
-	// deliberate, multi-second server-side delay — a strong tarpitting signal.
 	hasAbsoluteProof := analysis.HasVRFY ||
 		analysis.BreachCount > 0 ||
 		analysis.HasGoogleCalendar ||
@@ -61,14 +53,8 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		analysis.HasTeamsPresence ||
 		analysis.HasSharePoint
 
-	// hasSoftProof: secondary identity signals from third-party platforms.
-	// Also shields heuristic penalties and the O365 zombie penalty, but does
-	// NOT include timing delta. Timing is already rewarded with +25 pts in the
-	// boosters block; granting it penalty-immunity on top would be too generous
-	// given that a single noisy probe pair can produce a delta > 1500ms.
 	hasSoftProof := analysis.HasGitHub || analysis.HasAdobe || analysis.HasGravatar
 
-	// 2. BOOSTERS
 	if analysis.HasVRFY {
 		return 99, map[string]float64{"p0_vrfy_verified": 99.0}, models.ReachabilitySafe, models.StatusValid
 	}
@@ -137,10 +123,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		breakdown["p2_timing_weak"] = 25.0
 	}
 
-	// 3. PENALTIES
-	// Both Absolute and Soft proofs shield against harsh heuristics.
-	// A confirmed identity (breach record, GitHub, Adobe, etc.) makes
-	// entropy and domain-age penalties irrelevant.
 	if !hasAbsoluteProof && !hasSoftProof {
 		if analysis.EntropyScore > 0.5 {
 			score -= 20.0
@@ -156,12 +138,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		}
 	}
 
-	// 4. O365 ZOMBIE PENALTY
-	// Applied only when the domain is a catch-all with no identity proof.
-	// Soft proofs (e.g. GitHub) are sufficient to bypass this because they
-	// confirm the person exists independently of the O365 license check.
-	// The status guard ensures a breach-promoted StatusValid is never
-	// overwritten back to StatusCatchAll by this block.
 	if analysis.MxProvider == "office365" && analysis.IsCatchAll && !hasAbsoluteProof && !hasSoftProof {
 		if !analysis.HasTeamsPresence && !analysis.HasSharePoint {
 			score -= 30.0
@@ -172,23 +148,17 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		}
 	}
 
-	// 5. CATCH-ALL DISAMBIGUATION
-	// FIX: Removed the Office365 exclusion. If an O365 email is hiding behind
-	// an Accept-All firewall, but we find Absolute Proof (like Teams presence),
-	// it MUST be upgraded to Valid.
 	if analysis.IsCatchAll {
 		if hasAbsoluteProof {
 			boost := 50.0
 			score += boost
 			breakdown["resolution_catchall_strong"] = boost
-			status = models.StatusValid // Upgrades Catch-All to Valid!
+			status = models.StatusValid
 		} else if hasSoftProof {
 			boost := 25.0
 			score += boost
 			breakdown["resolution_catchall_medium"] = boost
 		} else {
-			// Apply the empty penalty only if it's NOT O365,
-			// because O365 already received the specific -30 Zombie penalty in Step 4.
 			if analysis.MxProvider != "office365" {
 				penalty := -20.0
 				score += penalty
@@ -197,7 +167,19 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		}
 	}
 
-	// 6. FINALIZE
+	if status == models.StatusUnknown {
+		if hasAbsoluteProof {
+			boost := 50.0
+			score += boost
+			breakdown["resolution_unknown_strong"] = boost
+			status = models.StatusValid
+		} else if hasSoftProof {
+			boost := 25.0
+			score += boost
+			breakdown["resolution_unknown_medium"] = boost
+		}
+	}
+
 	finalScore := int(math.Round(score))
 	if finalScore > 99 {
 		finalScore = 99
