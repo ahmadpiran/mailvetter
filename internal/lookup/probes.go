@@ -34,6 +34,14 @@ var sharedClient = &http.Client{
 	},
 }
 
+var sharedNoRedirectClient = &http.Client{
+	Timeout: 15 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+	Transport: sharedClient.Transport,
+}
+
 var userAgents = []string{
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -56,6 +64,25 @@ func DoProxiedRequest(req *http.Request, pURL *url.URL) (*http.Response, error) 
 		defer func() { <-proxy.Semaphore }()
 	}
 	return sharedClient.Do(req)
+}
+
+// doProxiedNoRedirectRequest is identical to DoProxiedRequest but uses
+// sharedNoRedirectClient so that HTTP redirects are not followed. This is
+// the correct building block for probes where a 302/301 response is itself
+// the positive signal (SharePoint, Microsoft Autodiscover).
+func doProxiedNoRedirectRequest(req *http.Request, pURL *url.URL) (*http.Response, error) {
+	reqCtx := context.WithValue(req.Context(), proxyCtxKey, pURL)
+	req = req.WithContext(reqCtx)
+
+	if pURL != nil && proxy.Enabled() {
+		select {
+		case proxy.Semaphore <- struct{}{}:
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
+		defer func() { <-proxy.Semaphore }()
+	}
+	return sharedNoRedirectClient.Do(req)
 }
 
 func CheckOffice365(ctx context.Context, domain string) bool {
@@ -87,10 +114,10 @@ func CheckTeamsPresence(ctx context.Context, email, domain string, pURL *url.URL
 }
 
 func CheckGoogleCalendar(ctx context.Context, email string, pURL *url.URL) bool {
-	url := fmt.Sprintf("https://calendar.google.com/calendar/dav/%s/events", email)
+	target := fmt.Sprintf("https://calendar.google.com/calendar/dav/%s/events", email)
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
 		if err != nil {
 			return false
 		}
@@ -143,23 +170,21 @@ func CheckSharePoint(ctx context.Context, email string, pURL *url.URL) bool {
 
 	baseTenant := domainParts[0]
 	userPath := fmt.Sprintf("%s_%s", user, strings.ReplaceAll(domain, ".", "_"))
-	url := fmt.Sprintf("https://%s-my.sharepoint.com/personal/%s", baseTenant, userPath)
-
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	target := fmt.Sprintf("https://%s-my.sharepoint.com/personal/%s", baseTenant, userPath)
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
 		if err != nil {
 			return false
 		}
 		req.Header.Set("User-Agent", getRandomUserAgent())
 
-		resp, err := client.Do(req)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		resp, err := doProxiedNoRedirectRequest(req, currentProxy)
 		if err != nil {
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
@@ -190,10 +215,10 @@ func CheckGravatar(ctx context.Context, email string, pURL *url.URL) bool {
 	cleanEmail := strings.TrimSpace(strings.ToLower(email))
 	hash := md5.Sum([]byte(cleanEmail))
 	hashString := fmt.Sprintf("%x", hash)
-	url := fmt.Sprintf("https://www.gravatar.com/avatar/%s?d=404", hashString)
+	target := fmt.Sprintf("https://www.gravatar.com/avatar/%s?d=404", hashString)
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
 		if err != nil {
 			return false
 		}
@@ -230,10 +255,10 @@ func CheckGravatar(ctx context.Context, email string, pURL *url.URL) bool {
 }
 
 func CheckGitHub(ctx context.Context, email string, pURL *url.URL) bool {
-	url := fmt.Sprintf("https://api.github.com/search/users?q=%s+in:email", email)
+	target := fmt.Sprintf("https://api.github.com/search/users?q=%s+in:email", email)
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
 		if err != nil {
 			return false
 		}
@@ -277,16 +302,13 @@ func CheckGitHub(ctx context.Context, email string, pURL *url.URL) bool {
 	return false
 }
 
+// CheckMicrosoftLogin probes the Office 365 Autodiscover endpoint to determine
+// whether an email address has an active Microsoft identity.
 func CheckMicrosoftLogin(ctx context.Context, email string, pURL *url.URL) bool {
-	targetURL := fmt.Sprintf("https://outlook.office365.com/autodiscover/autodiscover.json?Email=%s&Protocol=Autodiscoverv1", url.QueryEscape(email))
-
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-		Transport: sharedClient.Transport,
-	}
+	targetURL := fmt.Sprintf(
+		"https://outlook.office365.com/autodiscover/autodiscover.json?Email=%s&Protocol=Autodiscoverv1",
+		url.QueryEscape(email),
+	)
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
@@ -300,23 +322,11 @@ func CheckMicrosoftLogin(ctx context.Context, email string, pURL *url.URL) bool 
 			currentProxy = nil
 		}
 
-		reqCtx := context.WithValue(req.Context(), proxyCtxKey, currentProxy)
-		req = req.WithContext(reqCtx)
-
-		if currentProxy != nil && proxy.Enabled() {
-			select {
-			case proxy.Semaphore <- struct{}{}:
-			case <-ctx.Done():
-				return false
-			}
-		}
-
-		resp, err := client.Do(req)
-
-		if currentProxy != nil && proxy.Enabled() {
-			<-proxy.Semaphore
-		}
-
+		// doProxiedNoRedirectRequest acquires the semaphore slot (if a proxy is
+		// configured), injects the proxy URL into the request context, and
+		// releases the slot via defer before returning — unconditionally, even
+		// on panic. There is no way to leak the slot from this call site.
+		resp, err := doProxiedNoRedirectRequest(req, currentProxy)
 		if err != nil {
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
