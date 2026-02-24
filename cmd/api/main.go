@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"mailvetter/internal/cache"
 	"mailvetter/internal/proxy"
 	"mailvetter/internal/queue"
 	"mailvetter/internal/store"
@@ -49,8 +50,6 @@ func main() {
 
 		proxyLimitStr := os.Getenv("PROXY_CONCURRENCY")
 		proxyLimit, err := strconv.Atoi(proxyLimitStr)
-		// Log a warning when PROXY_CONCURRENCY is missing or non-numeric
-		// so operators know the proxy manager received 0 rather than failing silently.
 		if err != nil || proxyLimit <= 0 {
 			log.Printf("⚠️  PROXY_CONCURRENCY not set or invalid (%q), defaulting to 0 (proxy.Init will apply its own default)", proxyLimitStr)
 			proxyLimit = 0
@@ -73,7 +72,19 @@ func main() {
 		fmt.Println("⚠️  No proxies configured. Running with direct connections.")
 	}
 
-	// 4. Define Handlers
+	// 4. Build the root context used for background goroutines.
+	// Cancelling this context on shutdown stops the cache cleanup goroutine
+	// (and any other background work tied to it) cleanly.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 5. Start background cache eviction.
+	// StartCleanup launches a single goroutine that calls Cleanup every 5
+	// minutes and exits when ctx is cancelled (i.e. on graceful shutdown).
+	cache.StartCleanup(ctx, 5*time.Minute)
+	fmt.Println("✅ Cache eviction goroutine started (interval: 5m)")
+
+	// 6. Define Handlers
 	mux := http.NewServeMux()
 	mux.HandleFunc("/verify", enableCORS(requireAPIKey(verifyHandler)))
 	mux.HandleFunc("/upload", enableCORS(requireAPIKey(uploadHandler)))
@@ -82,7 +93,7 @@ func main() {
 	mux.HandleFunc("/info", enableCORS(infoHandler))
 	mux.Handle("/", http.FileServer(http.Dir("./static")))
 
-	// 5. Server Configuration
+	// 7. Server Configuration
 	server := &http.Server{
 		Addr:         ":8080",
 		Handler:      mux,
@@ -91,10 +102,7 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown on SIGTERM/SIGINT.
-	// Previously the server hard-killed on any signal, dropping in-flight
-	// validation requests mid-probe. Now we give active requests up to 30
-	// seconds to complete before the process exits.
+	// 8. Graceful shutdown on SIGTERM / SIGINT.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 
@@ -108,8 +116,12 @@ func main() {
 	<-quit
 	fmt.Println("⏳ Shutdown signal received, draining in-flight requests...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// Cancelling ctx stops the cache cleanup goroutine and any other
+	// background work before the process exits.
+	cancel()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("❌ Graceful shutdown failed: %v", err)
@@ -160,9 +172,6 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		result.Error = err.Error()
-		// Return 504 when validation timed out so callers can distinguish
-		// a timeout from a completed-but-uncertain result. A 200 with an error body
-		// is ambiguous and forces clients to parse JSON to detect failures.
 		if r.Context().Err() != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusGatewayTimeout)
@@ -172,7 +181,6 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	// Use log.Printf instead of fmt.Printf for structured, timestamped output.
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		log.Printf("❌ Error encoding /verify response for %s: %v", email, err)
 	}
@@ -191,7 +199,6 @@ func infoHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
-	// Log encode errors rather than silently discarding them.
 	if err := json.NewEncoder(w).Encode(guide); err != nil {
 		log.Printf("❌ Error encoding /info response: %v", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"mailvetter/internal/cache"
 	"mailvetter/internal/proxy"
 	"mailvetter/internal/queue"
 	"mailvetter/internal/store"
@@ -91,35 +92,37 @@ func main() {
 		}
 	}
 
-	// 5. Build a cancellable root context that is passed down into the worker
-	// pool. This is the single authoritative shutdown signal for the process —
-	// only main() calls cancel(), and it does so exactly once after receiving
-	// an OS signal below.
+	// 5. Build the root context. Cancelling it on shutdown propagates cleanly
+	// into the worker pool and the cache cleanup goroutine
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// 6. Start background cache eviction.
+	// The 5-minute interval is shorter than the shortest TTL (15 min) so
+	// entries are swept promptly after they expire without the goroutine
+	// running so frequently that it causes contention on the write lock.
+	cache.StartCleanup(ctx, 5*time.Minute)
+	log.Println("✅ Cache eviction goroutine started (interval: 5m)")
+
+	// 7. Register for SIGTERM / SIGINT. main() is the sole receiver — see
+	// the detailed comment in the issue #1 fix for why having two receivers
+	// on this channel causes a deadlock.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 
-	// 7. Start the worker pool in a background goroutine so that main() remains
-	// free to block on the quit channel. worker.Start receives ctx so that it
-	// can observe the cancellation signal — see internal/worker/runner.go.
+	// 8. Start the worker pool. It blocks until all goroutines exit, which
+	// happens after ctx is cancelled below.
 	go worker.Start(ctx, concurrency)
 
-	// 8. Block here until the operator sends SIGTERM or SIGINT (e.g. docker stop,
-	// kubectl rollout, or Ctrl-C). This is now the ONLY receive on quit.
+	// 9. Block until the OS sends a shutdown signal.
 	<-quit
 	log.Println("⏳ Shutdown signal received, draining in-flight jobs...")
 
-	// Cancelling ctx propagates into every BLPop call and per-job context
-	// inside the worker pool. Workers finish their current task, see ctx.Done()
-	// on the next loop iteration, and exit cleanly.
+	// Cancelling ctx propagates into the BLPop loop (workers stop picking up
+	// new jobs), into per-job contexts (in-flight probes are interrupted), and
+	// into the cache cleanup goroutine (exits cleanly).
 	cancel()
 
-	// Give in-flight jobs a bounded window to finish before the OS reclaims the
-	// process. This should be set to your p99 job latency. The hard ceiling here
-	// (30 s) is intentionally shorter than the per-job context timeout in
-	// runner.go (5 min) so that a single stuck job cannot block a deployment
-	// rollout indefinitely. In production, tune via an env var or flag.
 	const drainTimeout = 30 * time.Second
 	log.Printf("⏳ Waiting up to %s for in-flight jobs to complete...", drainTimeout)
 	time.Sleep(drainTimeout)
