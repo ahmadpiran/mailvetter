@@ -13,7 +13,7 @@
             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
             Mailvetter
         </div>
-        
+
         <div class="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400 transition-all">
             <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
             <input type="password" id="apiKeyInput" onchange="saveApiKey()" placeholder="Master API Key" class="text-sm bg-transparent border-none focus:ring-0 outline-none text-slate-600 w-40 placeholder-slate-400">
@@ -21,7 +21,7 @@
     </nav>
 
     <div class="max-w-4xl mx-auto py-12 px-4">
-        
+
         <div class="text-center mb-10">
             <h1 class="text-3xl font-bold text-slate-900">Bulk Verification Engine</h1>
             <p class="text-slate-500 mt-2">Upload a CSV to process millions of emails asynchronously.</p>
@@ -50,8 +50,14 @@
 
         <div id="resultsCard" class="hidden bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
-                <h3 class="font-semibold text-slate-800">Verification Results <span class="text-xs text-slate-400 font-normal ml-2">(Click row for details)</span></h3>
-                <button onclick="downloadCSV()" class="text-sm text-blue-600 hover:text-blue-800 font-medium">Download CSV</button>
+                <h3 class="font-semibold text-slate-800">
+                    Verification Results
+                    <span class="text-xs text-slate-400 font-normal ml-2">(Click row for details)</span>
+                </h3>
+                <div class="flex items-center gap-4">
+                    <span id="resultsSummary" class="text-xs text-slate-500"></span>
+                    <button onclick="downloadCSV()" class="text-sm text-blue-600 hover:text-blue-800 font-medium">Download CSV</button>
+                </div>
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full text-sm text-left">
@@ -63,16 +69,27 @@
                             <th class="px-6 py-3">Provider</th>
                         </tr>
                     </thead>
-                    <tbody id="resultsTableBody" class="divide-y divide-slate-100">
-                        </tbody>
+                    <tbody id="resultsTableBody" class="divide-y divide-slate-100"></tbody>
                 </table>
+            </div>
+
+            <!-- Pagination controls -->
+            <div id="paginationBar" class="hidden px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between">
+                <button id="prevPageBtn" onclick="changePage(-1)"
+                    class="px-4 py-1.5 rounded-full text-sm font-medium border border-slate-300 text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition">
+                    ← Prev
+                </button>
+                <span id="pageIndicator" class="text-sm text-slate-500"></span>
+                <button id="nextPageBtn" onclick="changePage(1)"
+                    class="px-4 py-1.5 rounded-full text-sm font-medium border border-slate-300 text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition">
+                    Next →
+                </button>
             </div>
         </div>
     </div>
 
     <div id="detailsModal" class="hidden fixed inset-0 bg-slate-900 bg-opacity-40 backdrop-blur-sm flex items-center justify-center z-50 px-4 transition-opacity">
         <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden">
-            
             <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-white">
                 <div>
                     <h3 class="font-bold text-lg text-slate-800">Deep Analysis</h3>
@@ -82,7 +99,6 @@
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
-
             <div class="p-6 overflow-y-auto flex-1 bg-slate-800">
                 <pre id="modalContent" class="text-sm text-green-400 font-mono whitespace-pre-wrap break-words"></pre>
             </div>
@@ -90,10 +106,19 @@
     </div>
 
     <script>
-        let currentJobId = null;
-        let pollInterval = null;
-        let rawResultsData = [];
+        // ─── State ────────────────────────────────────────────────────────────
+        let currentJobId   = null;
+        let pollInterval   = null;
 
+        // Pagination state. rawResultsData holds only the current page.
+        // allResultsData accumulates every row fetched so far for CSV export.
+        let rawResultsData  = [];
+        let allResultsData  = [];
+        let currentPage     = 1;
+        let totalCount      = 0;
+        const PAGE_SIZE     = 500;
+
+        // ─── Init ─────────────────────────────────────────────────────────────
         document.getElementById('apiKeyInput').value = localStorage.getItem('mv_api_key') || '';
 
         function saveApiKey() {
@@ -101,46 +126,45 @@
         }
 
         function getAuthHeaders() {
-            return {
-                'Authorization': 'Bearer ' + document.getElementById('apiKeyInput').value
-            };
+            return { 'Authorization': 'Bearer ' + document.getElementById('apiKeyInput').value };
         }
 
+        // ─── Upload ───────────────────────────────────────────────────────────
         async function uploadCSV() {
             const fileInput = document.getElementById('csvFile');
-            const btn = document.getElementById('uploadBtn');
-            
-            if (!fileInput.files[0]) {
-                alert("Please select a CSV file first.");
-                return;
-            }
+            const btn       = document.getElementById('uploadBtn');
 
-            btn.disabled = true;
+            if (!fileInput.files[0]) { alert("Please select a CSV file first."); return; }
+
+            btn.disabled  = true;
             btn.innerText = "Uploading...";
 
             const formData = new FormData();
             formData.append("file", fileInput.files[0]);
 
             try {
-                const response = await fetch('/upload', { 
-                    method: 'POST', 
-                    body: formData,
+                const response = await fetch('/upload', {
+                    method:  'POST',
+                    body:    formData,
                     headers: getAuthHeaders()
                 });
-                
-                if (response.status === 401) {
-                    throw new Error("Unauthorized! Check your API Key.");
-                }
+
+                if (response.status === 401) throw new Error("Unauthorized! Check your API Key.");
 
                 const data = await response.json();
-
                 if (data.job_id) {
                     currentJobId = data.job_id;
+
+                    // Reset pagination state for the new job.
+                    currentPage    = 1;
+                    allResultsData = [];
+                    rawResultsData = [];
+                    totalCount     = 0;
+
                     document.getElementById('jobIdDisplay').innerText = "ID: " + currentJobId;
-                    
                     document.getElementById('progressCard').classList.remove('hidden');
                     document.getElementById('resultsCard').classList.add('hidden');
-                    
+
                     pollInterval = setInterval(checkStatus, 2000);
                 } else {
                     alert("Upload failed: " + data.message);
@@ -148,90 +172,125 @@
             } catch (err) {
                 alert(err.message || "Error connecting to server.");
             } finally {
-                btn.disabled = false;
+                btn.disabled  = false;
                 btn.innerText = "Start Job";
             }
         }
 
+        // ─── Status polling ───────────────────────────────────────────────────
         async function checkStatus() {
             if (!currentJobId) return;
-
             try {
-                const response = await fetch(`/status?id=${currentJobId}`, {
-                    headers: getAuthHeaders()
-                });
-                
-                if (response.status === 401) {
-                    clearInterval(pollInterval);
-                    alert("Unauthorized! Check your API Key.");
-                    return;
-                }
+                const response = await fetch(`/status?id=${currentJobId}`, { headers: getAuthHeaders() });
+                if (response.status === 401) { clearInterval(pollInterval); alert("Unauthorized!"); return; }
 
-                const data = await response.json();
-
+                const data    = await response.json();
                 const percent = Math.round((data.processed_count / data.total_count) * 100);
-                
-                document.getElementById('jobStatusText').innerText = data.status;
-                document.getElementById('progressBar').style.width = percent + '%';
-                document.getElementById('jobCount').innerText = `${data.processed_count} / ${data.total_count}`;
+
+                document.getElementById('jobStatusText').innerText  = data.status;
+                document.getElementById('progressBar').style.width  = percent + '%';
+                document.getElementById('jobCount').innerText        = `${data.processed_count} / ${data.total_count}`;
 
                 if (data.status === 'completed') {
                     clearInterval(pollInterval);
                     document.getElementById('progressBar').classList.replace('bg-blue-500', 'bg-green-500');
                     document.getElementById('jobStatusText').classList.replace('text-blue-600', 'text-green-600');
-                    fetchResults();
+                    // Fetch the first page of results.
+                    currentPage = 1;
+                    await fetchResultsPage(currentPage);
                 }
             } catch (err) {
                 console.error("Error fetching status", err);
             }
         }
 
-        async function fetchResults() {
+        // ─── Paginated result fetching ─────────────────────────────────────────
+        async function fetchResultsPage(page) {
             try {
-                const response = await fetch(`/results?id=${currentJobId}`, {
-                    headers: getAuthHeaders()
-                });
-                rawResultsData = await response.json();
-                
-                const tbody = document.getElementById('resultsTableBody');
-                tbody.innerHTML = '';
+                const url      = `/results?id=${currentJobId}&page=${page}&page_size=${PAGE_SIZE}`;
+                const response = await fetch(url, { headers: getAuthHeaders() });
+                if (!response.ok) { console.error("Failed to fetch results page", response.status); return; }
 
-                rawResultsData.forEach((row, index) => {
-                    const email = row.email;
-                    const score = row.score;
-                    const status = row.data.status || 'unknown';
-                    const provider = row.data.analysis?.mx_provider || 'generic';
+                const data     = await response.json();
+                totalCount     = data.total_count;
+                rawResultsData = data.results || [];
 
-                    let statusColor = "text-slate-500 bg-slate-100";
-                    if (status === "valid") statusColor = "text-green-700 bg-green-100";
-                    if (status === "invalid") statusColor = "text-red-700 bg-red-100";
-                    if (status === "catch-all") statusColor = "text-amber-700 bg-amber-100";
+                // Accumulate all fetched rows so the CSV export always contains
+                // every email the user has loaded so far, not just the current page.
+                const startIdx = (page - 1) * PAGE_SIZE;
+                for (let i = 0; i < rawResultsData.length; i++) {
+                    allResultsData[startIdx + i] = rawResultsData[i];
+                }
 
-                    const tr = document.createElement('tr');
-                    tr.className = "hover:bg-blue-50 cursor-pointer transition-colors group";
-                    tr.setAttribute("onclick", `showDetails(${index})`);
-                    
-                    tr.innerHTML = `
-                        <td class="px-6 py-4 font-medium text-slate-900 group-hover:text-blue-600">${email}</td>
-                        <td class="px-6 py-4"><span class="px-2 py-1 rounded-md text-xs font-semibold ${statusColor}">${status}</span></td>
-                        <td class="px-6 py-4 font-mono text-slate-600">${score}/100</td>
-                        <td class="px-6 py-4 text-slate-500 capitalize">${provider}</td>
-                    `;
-                    tbody.appendChild(tr);
-                });
+                renderTable(rawResultsData);
+                renderPagination(page, data.total_count, data.has_more);
 
                 document.getElementById('resultsCard').classList.remove('hidden');
+                document.getElementById('resultsSummary').innerText =
+                    `${data.total_count.toLocaleString()} total results`;
             } catch (err) {
-                console.error("Error fetching results", err);
+                console.error("Error fetching results page", err);
             }
         }
 
-        // Modal Functions
+        // ─── Pagination controls ───────────────────────────────────────────────
+        function renderPagination(page, total, hasMore) {
+            const bar       = document.getElementById('paginationBar');
+            const totalPages = Math.ceil(total / PAGE_SIZE);
+
+            if (totalPages <= 1) { bar.classList.add('hidden'); return; }
+
+            bar.classList.remove('hidden');
+            document.getElementById('pageIndicator').innerText =
+                `Page ${page} of ${totalPages} (${total.toLocaleString()} rows)`;
+            document.getElementById('prevPageBtn').disabled = page <= 1;
+            document.getElementById('nextPageBtn').disabled = !hasMore;
+        }
+
+        async function changePage(delta) {
+            const newPage = currentPage + delta;
+            if (newPage < 1) return;
+            currentPage = newPage;
+            await fetchResultsPage(currentPage);
+            // Scroll the results card back into view when navigating pages.
+            document.getElementById('resultsCard').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // ─── Table rendering ───────────────────────────────────────────────────
+        function renderTable(rows) {
+            const tbody = document.getElementById('resultsTableBody');
+            tbody.innerHTML = '';
+
+            rows.forEach((row, index) => {
+                const email    = row.email;
+                const score    = row.score;
+                const status   = row.data.status   || 'unknown';
+                const provider = row.data.analysis?.mx_provider || 'generic';
+
+                let statusColor = "text-slate-500 bg-slate-100";
+                if (status === "valid")     statusColor = "text-green-700 bg-green-100";
+                if (status === "invalid")   statusColor = "text-red-700 bg-red-100";
+                if (status === "catch-all") statusColor = "text-amber-700 bg-amber-100";
+
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-blue-50 cursor-pointer transition-colors group";
+                tr.setAttribute("onclick", `showDetails(${index})`);
+                tr.innerHTML = `
+                    <td class="px-6 py-4 font-medium text-slate-900 group-hover:text-blue-600">${email}</td>
+                    <td class="px-6 py-4"><span class="px-2 py-1 rounded-md text-xs font-semibold ${statusColor}">${status}</span></td>
+                    <td class="px-6 py-4 font-mono text-slate-600">${score}/100</td>
+                    <td class="px-6 py-4 text-slate-500 capitalize">${provider}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ─── Modal ─────────────────────────────────────────────────────────────
         function showDetails(index) {
             const rowData = rawResultsData[index];
             if (!rowData) return;
             document.getElementById('modalEmailTitle').innerText = rowData.email;
-            document.getElementById('modalContent').innerText = JSON.stringify(rowData.data, null, 2);
+            document.getElementById('modalContent').innerText    = JSON.stringify(rowData.data, null, 2);
             document.getElementById('detailsModal').classList.remove('hidden');
         }
 
@@ -243,17 +302,23 @@
             if (e.target === this) closeModal();
         });
 
+        // ─── CSV Export ────────────────────────────────────────────────────────
+        // Exports only the rows that have been loaded so far (i.e. every page
+        // the user has navigated to). For a complete export the user should
+        // navigate through all pages, or we could add a server-side streaming
+        // export endpoint in the future.
         function downloadCSV() {
-            if (!rawResultsData || rawResultsData.length === 0) return;
+            if (!allResultsData || allResultsData.length === 0) return;
             let csvContent = "data:text/csv;charset=utf-8,Email,Score,Status,Provider\n";
-            rawResultsData.forEach(row => {
-                const status = row.data.status || 'unknown';
+            allResultsData.forEach(row => {
+                if (!row) return; // sparse array slots not yet fetched
+                const status   = row.data.status               || 'unknown';
                 const provider = row.data.analysis?.mx_provider || 'generic';
-                csvContent += `${row.email},${row.score},${status},${provider}\n`;
+                csvContent    += `${row.email},${row.score},${status},${provider}\n`;
             });
             const encodedUri = encodeURI(csvContent);
-            const link = document.createElement("a");
-            link.setAttribute("href", encodedUri);
+            const link       = document.createElement("a");
+            link.setAttribute("href",     encodedUri);
             link.setAttribute("download", `mailvetter_results_${currentJobId}.csv`);
             document.body.appendChild(link);
             link.click();
