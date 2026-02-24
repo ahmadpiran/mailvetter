@@ -337,8 +337,10 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string, pURL *u
 
 	time.Sleep(500 * time.Millisecond)
 
-	randomUser := generateRandomString(12)
-	ghostEmail := randomUser + "@" + domain
+	// Generate a realistic-looking ghost address to probe for catch-all
+	// behaviour. The address must look plausible — a string of random hex
+	// chars would be flagged immediately by enterprise gateways as a probe.
+	ghostEmail := generateGhostAddress() + "@" + domain
 
 	var ghostValid bool
 	var ghostTime time.Duration
@@ -393,7 +395,7 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string, pURL *u
 	return status, delta, isCatchAll
 }
 
-func generateRandomString(_ int) string {
+func generateGhostAddress() string {
 	firstNames := []string{"alex", "michael", "sarah", "david", "emma", "chris", "jessica", "matthew", "amanda", "daniel"}
 	lastNames := []string{"smith", "jones", "taylor", "brown", "williams", "wilson", "johnson", "davis", "miller", "martin"}
 

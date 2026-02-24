@@ -52,39 +52,40 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		return 99, map[string]float64{"p0_vrfy_verified": 99.0}, models.ReachabilitySafe, models.StatusValid
 	}
 
-	// ── 3. O365 zombie correction ────────────────────────────────────────────
+	// ── 3. O365 zombie correction (non-catch-all, SmtpStatus == 250) ─────────
 	//
-	// Office 365 is notorious for returning SMTP 250 OK for users who exist in
-	// Azure AD but either have no Exchange license or have been blocked from
-	// receiving mail. A raw score of 90 for such an address is a false positive
-	// that would cause real mail to be sent to an undeliverable inbox.
+	// Office 365 returns SMTP 250 for users who exist in Azure AD but have no
+	// Exchange license or have been blocked. We correct this false positive
+	// before adding proof boosts so the final score reflects deliverability.
 	//
-	// We correct this before adding any proof boosts so the final score
-	// accurately reflects deliverability rather than mere identity existence.
+	// This block only fires when SmtpStatus == 250 (i.e. the base score was
+	// set to 90 above). O365 catch-alls have SmtpStatus == 0 and are handled
+	// separately in the catch-all resolution section (step 6) below.
+	//
+	// o365ZombieCorrected is used in step 4 to prevent the breach status
+	// upgrade from overriding the zombie correction — a historically breached
+	// address may prove the inbox existed once, but if O365 says it is
+	// unlicensed today, it still cannot receive mail.
+	o365ZombieCorrected := false
+
 	if analysis.MxProvider == "office365" && analysis.SmtpStatus == 250 && !analysis.HasSharePoint {
+		o365ZombieCorrected = true
+
+		// correction_o365_false_positive revokes the 90-point base score that
+		// O365's dishonest 250 response earned.
+		score += -60.0
+		breakdown["correction_o365_false_positive"] = -60.0
+
 		if analysis.HasTeamsPresence {
-			// Identity confirmed in Azure AD / Teams, but no SharePoint/Exchange
-			// license means the mailbox cannot receive mail. This is the classic
-			// "zombie" account — the user exists but is undeliverable.
-			//
-			// correction_o365_false_positive revokes the 90-point base score.
-			// penalty_o365_unlicensed adds a further deduction to reflect that
-			// we have positive proof the mailbox is inactive.
-			score += -60.0
-			breakdown["correction_o365_false_positive"] = -60.0
+			// Identity exists in Azure AD / Teams but the mailbox is unlicensed.
 			score += -20.0
 			breakdown["penalty_o365_unlicensed"] = -20.0
-			status = models.StatusCatchAll
 		} else {
-			// SMTP said 250 but the user has zero Microsoft footprint — no Teams
-			// presence, no SharePoint. O365 is lying outright (ghost account).
-			// Apply the false-positive correction and the ghost penalty.
-			score += -60.0
-			breakdown["correction_o365_false_positive"] = -60.0
+			// SMTP said 250 but the user has zero Microsoft footprint at all.
 			score += -30.0
 			breakdown["penalty_o365_ghost"] = -30.0
-			status = models.StatusCatchAll
 		}
+		status = models.StatusCatchAll
 	}
 
 	// ── 4. Proof signals ─────────────────────────────────────────────────────
@@ -129,7 +130,14 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		}
 		score += boost
 		breakdown["p1_historical_breach"] = boost
-		if status == models.StatusCatchAll {
+
+		// Breach history proves the address existed as a real human inbox, so
+		// we upgrade catch-all to valid — UNLESS an O365 zombie correction was
+		// applied. A zombie with breach history proves the mailbox existed once,
+		// but O365 has told us it cannot receive mail today. The score boost
+		// still applies (the historical signal has value for lead scoring), but
+		// the status must remain catch_all to reflect current undeliverability.
+		if status == models.StatusCatchAll && !o365ZombieCorrected {
 			status = models.StatusValid
 		}
 	}
@@ -176,8 +184,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	}
 
 	// ── 6. Catch-all resolution ───────────────────────────────────────────────
-	// For non-O365 catch-alls (O365 catch-alls without SMTP 250 are handled
-	// by the existing ghost penalty path preserved below).
 	if analysis.IsCatchAll {
 		if hasAbsoluteProof {
 			score += 50.0
@@ -187,7 +193,18 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 			score += 25.0
 			breakdown["resolution_catchall_medium"] = 25.0
 		} else {
-			if analysis.MxProvider != "office365" {
+			// No footprint at all. For generic providers apply the standard
+			// empty catch-all penalty. For O365 catch-alls apply the stronger
+			// ghost penalty — O365 accepting all mail with no identifiable
+			// users is a stronger negative signal than a generic catch-all.
+			//
+			// Note: the zombie correction block (step 3) only fires when
+			// SmtpStatus == 250. O365 catch-alls have SmtpStatus == 0, so
+			// penalty_o365_ghost here is a separate, non-overlapping path.
+			if analysis.MxProvider == "office365" {
+				score += -30.0
+				breakdown["penalty_o365_ghost"] = -30.0
+			} else {
 				score += -20.0
 				breakdown["resolution_catchall_empty"] = -20.0
 			}
