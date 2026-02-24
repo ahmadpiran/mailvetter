@@ -64,19 +64,13 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	// be undeliverable regardless of how many positive signals exist elsewhere.
 	o365ZombieCorrected := false
 
-	if analysis.MxProvider == "office365" && analysis.SmtpStatus == 250 && !analysis.HasSharePoint {
-		o365ZombieCorrected = true
-		score += -60.0
-		breakdown["correction_o365_false_positive"] = -60.0
-
-		if analysis.HasTeamsPresence {
-			score += -20.0
-			breakdown["penalty_o365_unlicensed"] = -20.0
-		} else {
-			score += -30.0
-			breakdown["penalty_o365_ghost"] = -30.0
+	if analysis.MxProvider == "office365" && analysis.SmtpStatus == 250 {
+		if analysis.HasTeamsPresence && !analysis.HasSharePoint {
+			o365ZombieCorrected = true
+			score += -80.0 // Combine the false positive and unlicensed penalties
+			breakdown["correction_o365_zombie"] = -80.0
+			status = models.StatusInvalid // A Zombie is definitively Invalid
 		}
-		status = models.StatusCatchAll
 	}
 
 	// ── 4. Proof signals ─────────────────────────────────────────────────────

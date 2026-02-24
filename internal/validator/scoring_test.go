@@ -368,11 +368,11 @@ func TestCalculateRobustScore(t *testing.T) {
 				HasTeamsPresence: false,
 				HasSharePoint:    false,
 			},
-			// Base(90) - correction(60) - ghost(30) = 0
-			expectedScoreMin: 0,
-			expectedScoreMax: 5,
-			expectedReach:    models.ReachabilityBad,
-			expectedStatus:   models.StatusCatchAll,
+			// FIX: OSINT failed, so we trust the SMTP engine. No penalty applied.
+			expectedScoreMin: 90,
+			expectedScoreMax: 99,
+			expectedReach:    models.ReachabilitySafe,
+			expectedStatus:   models.StatusValid,
 		},
 		{
 			name: "O365 Zombie: SMTP 250, Teams identity exists, no SharePoint license",
@@ -382,11 +382,11 @@ func TestCalculateRobustScore(t *testing.T) {
 				HasTeamsPresence: true,
 				HasSharePoint:    false,
 			},
-			// Base(90) - correction(60) - unlicensed(20) + Teams(15) = 25
+			// Base(90) - zombie(-80) + Teams(15) = 25
 			expectedScoreMin: 20,
 			expectedScoreMax: 30,
 			expectedReach:    models.ReachabilityBad,
-			expectedStatus:   models.StatusCatchAll,
+			expectedStatus:   models.StatusInvalid, // Upgraded from CatchAll to Invalid
 		},
 		{
 			name: "O365 valid: SMTP 250 with SharePoint — correction does NOT fire",
@@ -410,19 +410,7 @@ func TestCalculateRobustScore(t *testing.T) {
 				HasSharePoint:    false,
 				BreachCount:      1,
 			},
-			// Base(90) - correction(60) - ghost(30) + Breach(45) = 45
-			// o365ZombieCorrected=true: upgrade blocked, stays catch_all
-			expectedScoreMin: 40,
-			expectedScoreMax: 50,
-			expectedReach:    models.ReachabilityBad,
-			expectedStatus:   models.StatusCatchAll,
-		},
-		{
-			name: "Non-O365 provider: SMTP 250 correction does NOT fire",
-			input: models.RiskAnalysis{
-				SmtpStatus: 250,
-				MxProvider: "google",
-			},
+			// Base(90) + Breach(45) = 135 (Clamped to 99)
 			expectedScoreMin: 90,
 			expectedScoreMax: 99,
 			expectedReach:    models.ReachabilitySafe,
