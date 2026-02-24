@@ -104,6 +104,52 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedStatus:   models.StatusCatchAll,
 		},
 
+		// ── Enterprise gateway catch-all cases ────────────────────────────────
+		{
+			name: "Barracuda catch-all with SPF+DMARC+SaaS (raine.com regression)",
+			input: models.RiskAnalysis{
+				IsCatchAll:    true,
+				MxProvider:    "barracuda",
+				HasSPF:        true,
+				HasDMARC:      true,
+				HasSaaSTokens: true,
+				TimingDeltaMs: 39,
+			},
+			expectedScoreMin: 58,
+			expectedScoreMax: 68,
+			expectedReach:    models.ReachabilityRisky,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			// Proofpoint catch-all — same logic, confirms Barracuda fix doesn't
+			// break existing enterprise gateway behaviour.
+			name: "Proofpoint catch-all with SPF+DMARC",
+			input: models.RiskAnalysis{
+				IsCatchAll: true,
+				MxProvider: "proofpoint",
+				HasSPF:     true,
+				HasDMARC:   true,
+			},
+			// Base(30) + enterprise_sec(15) + SPF(3.5) + DMARC(4.5) = 53
+			expectedScoreMin: 48,
+			expectedScoreMax: 58,
+			expectedReach:    models.ReachabilityBad,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			// Empty catch-all on a generic domain — penalty still applies.
+			name: "Generic catch-all, no footprint, no enterprise gateway",
+			input: models.RiskAnalysis{
+				IsCatchAll: true,
+				MxProvider: "generic",
+			},
+			// Base(30) - catchall_empty(20) = 10
+			expectedScoreMin: 5,
+			expectedScoreMax: 15,
+			expectedReach:    models.ReachabilityBad,
+			expectedStatus:   models.StatusCatchAll,
+		},
+
 		// ── Unknown domain cases ──────────────────────────────────────────────
 		{
 			name: "Unknown Domain Upgraded to Valid by Absolute Proof (Calendar)",
@@ -112,7 +158,7 @@ func TestCalculateRobustScore(t *testing.T) {
 				IsCatchAll:        false,
 				HasGoogleCalendar: true,
 			},
-			// Base(20) + Calendar(42.5) + Strong Unknown Boost(50) = 112.5 → clamped to 99
+			// Base(20) + Calendar(42.5) + Strong Unknown Boost(50) = 112.5 → 99
 			expectedScoreMin: 90,
 			expectedScoreMax: 99,
 			expectedReach:    models.ReachabilitySafe,
@@ -134,7 +180,6 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 
 		// ── O365 catch-all cases (SmtpStatus = 0) ────────────────────────────
-		// These do NOT enter the zombie correction block (SmtpStatus != 250).
 		{
 			name: "Office 365 Zombie (Pure Ghost Catch-All, no SMTP 250)",
 			input: models.RiskAnalysis{
@@ -143,8 +188,9 @@ func TestCalculateRobustScore(t *testing.T) {
 				HasTeamsPresence: false,
 				HasSharePoint:    false,
 			},
+			// Base(30) - o365_ghost(30) = 0
 			expectedScoreMin: 0,
-			expectedScoreMax: 10,
+			expectedScoreMax: 5,
 			expectedReach:    models.ReachabilityBad,
 			expectedStatus:   models.StatusCatchAll,
 		},
@@ -163,12 +209,9 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 
 		// ── O365 zombie correction cases (SmtpStatus = 250) ──────────────────
-		// These ARE the newly implemented correction paths (issue #11).
 		{
 			name: "O365 Zombie: SMTP 250 but no SharePoint or Teams (Ghost)",
-			// SMTP lied. User has zero Microsoft footprint.
-			// correction_o365_false_positive(-60) + penalty_o365_ghost(-30)
-			// Base(90) - 60 - 30 = 0
+			// Base(90) - correction(60) - ghost(30) = 0
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
 				MxProvider:       "office365",
@@ -182,9 +225,7 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 		{
 			name: "O365 Zombie: SMTP 250, Teams identity exists, no SharePoint license",
-			// Identity confirmed but mailbox unlicensed — cannot receive mail.
-			// correction_o365_false_positive(-60) + penalty_o365_unlicensed(-20)
-			// Base(90) - 60 - 20 + Teams(15) = 25
+			// Base(90) - correction(60) - unlicensed(20) + Teams(15) = 25
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
 				MxProvider:       "office365",
@@ -198,8 +239,7 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 		{
 			name: "O365 Zombie with soft proof partially recovers score",
-			// Unlicensed zombie who also has a GitHub account.
-			// Base(90) - 60 - 20 + Teams(15) + GitHub(12) = 37
+			// Base(90) - correction(60) - unlicensed(20) + Teams(15) + GitHub(12) = 37
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
 				MxProvider:       "office365",
@@ -214,8 +254,6 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 		{
 			name: "O365 valid: SMTP 250 with SharePoint — correction does NOT fire",
-			// SharePoint proves an active licensed mailbox. This is a genuinely
-			// deliverable address — the correction block must not touch it.
 			// Base(90) + SharePoint(60) = 150 → clamped to 99
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
@@ -230,10 +268,8 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 		{
 			name: "O365 Ghost: SMTP 250, no footprint, but has breach history",
-			// Breach history is absolute proof the address existed as a real
-			// human inbox at some point. Even on a zombie O365 account the
-			// breach boost partially recovers the score after correction.
-			// Base(90) - 60 - 30 + Breach(45) = 45
+			// Base(90) - correction(60) - ghost(30) + Breach(45) = 45
+			// Status stays catch_all despite breach (o365ZombieCorrected=true)
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
 				MxProvider:       "office365",
@@ -248,8 +284,6 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 		{
 			name: "Non-O365 provider: SMTP 250 correction does NOT fire",
-			// The zombie correction is O365-specific. Google Workspace and
-			// generic providers returning 250 should not be penalised.
 			input: models.RiskAnalysis{
 				SmtpStatus: 250,
 				MxProvider: "google",
@@ -259,63 +293,18 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedReach:    models.ReachabilitySafe,
 			expectedStatus:   models.StatusValid,
 		},
-	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			score, _, reach, status := CalculateRobustScore(tt.input)
-
-			if score < tt.expectedScoreMin || score > tt.expectedScoreMax {
-				t.Errorf("Score %d not in range [%d, %d]", score, tt.expectedScoreMin, tt.expectedScoreMax)
-			}
-			if reach != tt.expectedReach {
-				t.Errorf("Reachability %q != expected %q", reach, tt.expectedReach)
-			}
-			if tt.expectedStatus != "" && status != tt.expectedStatus {
-				t.Errorf("Status %q != expected %q", status, tt.expectedStatus)
-			}
-		})
-	}
-}
-
-func TestGoogleCalendarFalsePositive(t *testing.T) {
-	tests := []struct {
-		name             string
-		input            models.RiskAnalysis
-		expectedScoreMin int
-		expectedScoreMax int
-		expectedReach    models.Reachability
-		expectedStatus   models.VerificationStatus
-	}{
+		// ── Google Calendar false positive guard ──────────────────────────────
 		{
-			// Reproduces the gmehta@raine.com production case.
-			// Barracuda catch-all with SPF + DMARC + SaaS tokens but no
-			// social footprint and a negligible timing delta.
-			// Expected: Risky, not Safe.
-			name: "Barracuda catch-all, no Google Calendar, no social proof",
-			input: models.RiskAnalysis{
-				IsCatchAll:        true,
-				MxProvider:        "barracuda",
-				HasSPF:            true,
-				HasDMARC:          true,
-				HasSaaSTokens:     true,
-				HasGoogleCalendar: false, // probe correctly returns false now
-				TimingDeltaMs:     58,    // too low to be a timing signal
-			},
-			// Base(30) + SPF(3.5) + DMARC(4.5) + SaaS(10) - catchall_empty(20) = 28
-			expectedScoreMin: 20,
-			expectedScoreMax: 35,
-			expectedReach:    models.ReachabilityBad,
-			expectedStatus:   models.StatusCatchAll,
-		},
-		{
+			// Verifies that a legitimate Google Calendar signal on a real
+			// Google Workspace catch-all still produces a Safe score.
 			name: "Google Workspace catch-all with legitimate Calendar signal",
 			input: models.RiskAnalysis{
 				IsCatchAll:        true,
 				MxProvider:        "google",
 				HasSPF:            true,
 				HasDMARC:          true,
-				HasGoogleCalendar: true, // legitimate positive on a Google MX domain
+				HasGoogleCalendar: true,
 			},
 			// Base(30) + Calendar(42.5) + SPF(3.5) + DMARC(4.5) + strong(50) = 130.5 → 99
 			expectedScoreMin: 90,
