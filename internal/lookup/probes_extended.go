@@ -37,6 +37,15 @@ func CheckAdobe(ctx context.Context, email string, pURL *url.URL) bool {
 			return false
 		}
 
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			resp.Body.Close()
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return false
+		}
+
 		if resp.StatusCode != 200 {
 			resp.Body.Close()
 			return false
@@ -70,6 +79,15 @@ func CheckDomainAge(ctx context.Context, domain string, pURL *url.URL) int {
 
 		resp, err := DoProxiedRequest(req, pURL)
 		if err != nil {
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return 0
+		}
+
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			resp.Body.Close()
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
 				continue

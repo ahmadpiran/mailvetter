@@ -105,6 +105,15 @@ func CheckGoogleCalendar(ctx context.Context, email string, pURL *url.URL) bool 
 			return false
 		}
 
+		if resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			resp.Body.Close()
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return false
+		}
+
 		isOk := resp.StatusCode == 401 || resp.StatusCode == 200
 		resp.Body.Close()
 		return isOk
@@ -136,7 +145,6 @@ func CheckSharePoint(ctx context.Context, email string, pURL *url.URL) bool {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
-		Transport: sharedClient.Transport,
 	}
 
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -146,29 +154,22 @@ func CheckSharePoint(ctx context.Context, email string, pURL *url.URL) bool {
 		}
 		req.Header.Set("User-Agent", getRandomUserAgent())
 
-		reqCtx := context.WithValue(ctx, proxyCtxKey, pURL)
-		req = req.WithContext(reqCtx)
-
-		if pURL != nil && proxy.Enabled() {
-			select {
-			case proxy.Semaphore <- struct{}{}:
-			case <-ctx.Done():
-				return false
-			}
-		}
-
 		resp, err := client.Do(req)
-
-		if pURL != nil && proxy.Enabled() {
-			<-proxy.Semaphore
-		}
-
 		if err != nil {
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 			log.Printf("[DEBUG-OSINT] SharePoint HTTP Error for %s: %v", email, err)
+			return false
+		}
+
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			resp.Body.Close()
+			if attempt == 1 {
+				time.Sleep(1 * time.Second)
+				continue
+			}
 			return false
 		}
 
@@ -202,6 +203,15 @@ func CheckGravatar(ctx context.Context, email string, pURL *url.URL) bool {
 			return false
 		}
 
+		if resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			resp.Body.Close()
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return false
+		}
+
 		isOk := resp.StatusCode == 200
 		resp.Body.Close()
 		return isOk
@@ -221,6 +231,15 @@ func CheckGitHub(ctx context.Context, email string, pURL *url.URL) bool {
 
 		resp, err := DoProxiedRequest(req, pURL)
 		if err != nil {
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return false
+		}
+
+		if resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			resp.Body.Close()
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
 				continue
@@ -261,10 +280,15 @@ func CheckMicrosoftLogin(ctx context.Context, email string, pURL *url.URL) bool 
 		}
 		req.Header.Set("User-Agent", getRandomUserAgent())
 
-		reqCtx := context.WithValue(req.Context(), proxyCtxKey, pURL)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		reqCtx := context.WithValue(req.Context(), proxyCtxKey, currentProxy)
 		req = req.WithContext(reqCtx)
 
-		if pURL != nil && proxy.Enabled() {
+		if currentProxy != nil && proxy.Enabled() {
 			select {
 			case proxy.Semaphore <- struct{}{}:
 			case <-ctx.Done():
@@ -274,11 +298,20 @@ func CheckMicrosoftLogin(ctx context.Context, email string, pURL *url.URL) bool 
 
 		resp, err := client.Do(req)
 
-		if pURL != nil && proxy.Enabled() {
+		if currentProxy != nil && proxy.Enabled() {
 			<-proxy.Semaphore
 		}
 
 		if err != nil {
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return false
+		}
+
+		if resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			resp.Body.Close()
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
 				continue
