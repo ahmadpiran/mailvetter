@@ -11,7 +11,14 @@ import (
 
 var Client *redis.Client
 
-// Task represents a single unit of work for the worker
+// ErrNil is re-exported from the redis package so that callers (e.g. the
+// worker pool) can check for a BLPop timeout without importing go-redis
+// directly. redis.Nil is returned by BLPop when the timeout elapses and no
+// item was available — it is not a real error and should be handled as a
+// normal "queue empty" signal.
+var ErrNil = redis.Nil
+
+// Task represents a single unit of work for the worker.
 type Task struct {
 	JobID string `json:"job_id"`
 	Email string `json:"email"`
@@ -19,7 +26,7 @@ type Task struct {
 
 const QueueName = "tasks:verify"
 
-// Init connects to Redis
+// Init connects to Redis.
 func Init(addr string) error {
 	Client = redis.NewClient(&redis.Options{
 		Addr:        addr,

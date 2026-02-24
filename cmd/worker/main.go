@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"mailvetter/internal/proxy"
 	"mailvetter/internal/queue"
@@ -39,10 +40,6 @@ func main() {
 	log.Println("✅ Connected to PostgreSQL")
 
 	// 3. Initialize Proxy Manager
-	// FIX 6: Proxy-related env vars are now parsed inside the guard block.
-	// Previously they were parsed unconditionally at the top of main, meaning
-	// strconv.Atoi and os.Getenv ran even when no proxy was configured,
-	// adding noise and unnecessary work.
 	proxyListRaw := os.Getenv("PROXY_LIST")
 	smtpProxyEnabled := false
 
@@ -82,8 +79,6 @@ func main() {
 		log.Printf("🔧 WORKER_CONCURRENCY explicitly set to %d", concurrency)
 	} else {
 		if proxyListRaw != "" && smtpProxyEnabled {
-			// Proxy mode: scale workers to proxy slots × 2.
-			// This keeps proxy slots saturated without causing context starvation.
 			actualProxyLimit := cap(proxy.Semaphore)
 			concurrency = actualProxyLimit * 2
 			if concurrency < 10 {
@@ -96,35 +91,38 @@ func main() {
 		}
 	}
 
-	// 5. FIX 5/7: Graceful shutdown on SIGTERM/SIGINT.
-	// Previously worker.Start blocked forever with no signal handling, meaning
-	// SIGTERM hard-killed the process mid-job. Now we pass a context that is
-	// cancelled on shutdown, giving worker.Start a clean signal to drain
-	// in-flight jobs before exiting.
+	// 5. Build a cancellable root context that is passed down into the worker
+	// pool. This is the single authoritative shutdown signal for the process —
+	// only main() calls cancel(), and it does so exactly once after receiving
+	// an OS signal below.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 
-	go func() {
-		<-quit
-		log.Println("⏳ Shutdown signal received, draining in-flight jobs...")
-		cancel()
-	}()
+	// 7. Start the worker pool in a background goroutine so that main() remains
+	// free to block on the quit channel. worker.Start receives ctx so that it
+	// can observe the cancellation signal — see internal/worker/runner.go.
+	go worker.Start(ctx, concurrency)
 
-	// Run worker.Start in a goroutine so the main goroutine can block on the
-	// quit signal. worker.Start only accepts (int) — if its signature is ever
-	// updated to accept a context.Context, pass ctx here for a cleaner drain.
-	go worker.Start(concurrency)
-
+	// 8. Block here until the operator sends SIGTERM or SIGINT (e.g. docker stop,
+	// kubectl rollout, or Ctrl-C). This is now the ONLY receive on quit.
 	<-quit
-	log.Println("⏳ Shutdown signal received, waiting for in-flight jobs to drain...")
+	log.Println("⏳ Shutdown signal received, draining in-flight jobs...")
+
+	// Cancelling ctx propagates into every BLPop call and per-job context
+	// inside the worker pool. Workers finish their current task, see ctx.Done()
+	// on the next loop iteration, and exit cleanly.
 	cancel()
 
-	// ctx.Done() is already closed by cancel() above, so this returns immediately.
-	// The real drain happens inside worker.Start — this just ensures the log line
-	// below only prints after cancel() has propagated to any ctx-aware job loops.
-	<-ctx.Done()
+	// Give in-flight jobs a bounded window to finish before the OS reclaims the
+	// process. This should be set to your p99 job latency. The hard ceiling here
+	// (30 s) is intentionally shorter than the per-job context timeout in
+	// runner.go (5 min) so that a single stuck job cannot block a deployment
+	// rollout indefinitely. In production, tune via an env var or flag.
+	const drainTimeout = 30 * time.Second
+	log.Printf("⏳ Waiting up to %s for in-flight jobs to complete...", drainTimeout)
+	time.Sleep(drainTimeout)
+
 	log.Println("✅ Worker shut down cleanly.")
 }
