@@ -30,6 +30,7 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	var reachability models.Reachability
 	var status models.VerificationStatus
 
+	// ── 1. Base score ────────────────────────────────────────────────────────
 	if analysis.SmtpStatus == 250 {
 		score = 90.0
 		breakdown["base_smtp_valid"] = 90.0
@@ -46,6 +47,47 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		status = models.StatusUnknown
 	}
 
+	// ── 2. VRFY golden ticket — short-circuit immediately ───────────────────
+	if analysis.HasVRFY {
+		return 99, map[string]float64{"p0_vrfy_verified": 99.0}, models.ReachabilitySafe, models.StatusValid
+	}
+
+	// ── 3. O365 zombie correction ────────────────────────────────────────────
+	//
+	// Office 365 is notorious for returning SMTP 250 OK for users who exist in
+	// Azure AD but either have no Exchange license or have been blocked from
+	// receiving mail. A raw score of 90 for such an address is a false positive
+	// that would cause real mail to be sent to an undeliverable inbox.
+	//
+	// We correct this before adding any proof boosts so the final score
+	// accurately reflects deliverability rather than mere identity existence.
+	if analysis.MxProvider == "office365" && analysis.SmtpStatus == 250 && !analysis.HasSharePoint {
+		if analysis.HasTeamsPresence {
+			// Identity confirmed in Azure AD / Teams, but no SharePoint/Exchange
+			// license means the mailbox cannot receive mail. This is the classic
+			// "zombie" account — the user exists but is undeliverable.
+			//
+			// correction_o365_false_positive revokes the 90-point base score.
+			// penalty_o365_unlicensed adds a further deduction to reflect that
+			// we have positive proof the mailbox is inactive.
+			score += -60.0
+			breakdown["correction_o365_false_positive"] = -60.0
+			score += -20.0
+			breakdown["penalty_o365_unlicensed"] = -20.0
+			status = models.StatusCatchAll
+		} else {
+			// SMTP said 250 but the user has zero Microsoft footprint — no Teams
+			// presence, no SharePoint. O365 is lying outright (ghost account).
+			// Apply the false-positive correction and the ghost penalty.
+			score += -60.0
+			breakdown["correction_o365_false_positive"] = -60.0
+			score += -30.0
+			breakdown["penalty_o365_ghost"] = -30.0
+			status = models.StatusCatchAll
+		}
+	}
+
+	// ── 4. Proof signals ─────────────────────────────────────────────────────
 	hasAbsoluteProof := analysis.HasVRFY ||
 		analysis.BreachCount > 0 ||
 		analysis.HasGoogleCalendar ||
@@ -55,10 +97,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 
 	hasSoftProof := analysis.HasGitHub || analysis.HasAdobe || analysis.HasGravatar
 
-	if analysis.HasVRFY {
-		return 99, map[string]float64{"p0_vrfy_verified": 99.0}, models.ReachabilitySafe, models.StatusValid
-	}
-
 	if analysis.HasTeamsPresence {
 		score += WeightTeams
 		breakdown["p0_teams_identity"] = WeightTeams
@@ -67,7 +105,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		score += WeightSharePoint
 		breakdown["p0_sharepoint_license"] = WeightSharePoint
 	}
-
 	if analysis.HasGoogleCalendar {
 		score += WeightCalendar
 		breakdown["p0_calendar"] = WeightCalendar
@@ -76,7 +113,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		score += WeightAdobe
 		breakdown["p2_adobe"] = WeightAdobe
 	}
-
 	if analysis.HasGitHub {
 		score += WeightGitHub
 		breakdown["p2_github"] = WeightGitHub
@@ -123,6 +159,7 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		breakdown["p2_timing_weak"] = 25.0
 	}
 
+	// ── 5. Penalties (only when no proof exists to shield them) ──────────────
 	if !hasAbsoluteProof && !hasSoftProof {
 		if analysis.EntropyScore > 0.5 {
 			score -= 20.0
@@ -138,48 +175,38 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		}
 	}
 
-	if analysis.MxProvider == "office365" && analysis.IsCatchAll && !hasAbsoluteProof && !hasSoftProof {
-		if !analysis.HasTeamsPresence && !analysis.HasSharePoint {
-			score -= 30.0
-			breakdown["penalty_o365_ghost"] = -30.0
-			if status != models.StatusValid {
-				status = models.StatusCatchAll
-			}
-		}
-	}
-
+	// ── 6. Catch-all resolution ───────────────────────────────────────────────
+	// For non-O365 catch-alls (O365 catch-alls without SMTP 250 are handled
+	// by the existing ghost penalty path preserved below).
 	if analysis.IsCatchAll {
 		if hasAbsoluteProof {
-			boost := 50.0
-			score += boost
-			breakdown["resolution_catchall_strong"] = boost
+			score += 50.0
+			breakdown["resolution_catchall_strong"] = 50.0
 			status = models.StatusValid
 		} else if hasSoftProof {
-			boost := 25.0
-			score += boost
-			breakdown["resolution_catchall_medium"] = boost
+			score += 25.0
+			breakdown["resolution_catchall_medium"] = 25.0
 		} else {
 			if analysis.MxProvider != "office365" {
-				penalty := -20.0
-				score += penalty
-				breakdown["resolution_catchall_empty"] = penalty
+				score += -20.0
+				breakdown["resolution_catchall_empty"] = -20.0
 			}
 		}
 	}
 
+	// ── 7. Unknown domain resolution ─────────────────────────────────────────
 	if status == models.StatusUnknown {
 		if hasAbsoluteProof {
-			boost := 50.0
-			score += boost
-			breakdown["resolution_unknown_strong"] = boost
+			score += 50.0
+			breakdown["resolution_unknown_strong"] = 50.0
 			status = models.StatusValid
 		} else if hasSoftProof {
-			boost := 25.0
-			score += boost
-			breakdown["resolution_unknown_medium"] = boost
+			score += 25.0
+			breakdown["resolution_unknown_medium"] = 25.0
 		}
 	}
 
+	// ── 8. Clamp, band, return ────────────────────────────────────────────────
 	finalScore := int(math.Round(score))
 	if finalScore > 99 {
 		finalScore = 99
