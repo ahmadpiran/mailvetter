@@ -269,8 +269,11 @@
 
                 let statusColor = "text-slate-500 bg-slate-100";
                 if (status === "valid")     statusColor = "text-green-700 bg-green-100";
+                if (status === "risky")     statusColor = "text-green-700 bg-orange-100";
+                if (status === "catch-all") statusColor = "text-amber-700 bg-blue-100";
+                if (status === "unknown") statusColor = "text-amber-700 bg-amber-100";
                 if (status === "invalid")   statusColor = "text-red-700 bg-red-100";
-                if (status === "catch-all") statusColor = "text-amber-700 bg-amber-100";
+                
 
                 const tr = document.createElement('tr');
                 tr.className = "hover:bg-blue-50 cursor-pointer transition-colors group";
