@@ -58,10 +58,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	}
 
 	// ── 3. O365 zombie correction (SmtpStatus == 250 only) ───────────────────
-	//
-	// o365ZombieCorrected is propagated to step 9 to prevent zombie-corrected
-	// accounts from being upgraded to StatusRisky — the mailbox is known to
-	// be undeliverable regardless of how many positive signals exist elsewhere.
 	o365ZombieCorrected := false
 
 	if analysis.MxProvider == "office365" && analysis.SmtpStatus == 250 {
