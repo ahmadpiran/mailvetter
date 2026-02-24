@@ -52,12 +52,14 @@ func TestCalculateRobustScore(t *testing.T) {
 
 		// ── Catch-all cases ───────────────────────────────────────────────────
 		{
-			name: "Standard Catch-All (No Footprint)",
+			name: "Standard Catch-All (No Footprint, Unknown Age)",
 			input: models.RiskAnalysis{
 				IsCatchAll:    true,
 				MxProvider:    "google",
 				TimingDeltaMs: 50,
+				DomainAgeDays: 0, // RDAP returned no data — penalty still applies
 			},
+			// Base(30) - catchall_empty(20) = 10
 			expectedScoreMin: 5,
 			expectedScoreMax: 20,
 			expectedReach:    models.ReachabilityBad,
@@ -69,7 +71,9 @@ func TestCalculateRobustScore(t *testing.T) {
 				IsCatchAll:    true,
 				MxProvider:    "google",
 				TimingDeltaMs: 2000,
+				DomainAgeDays: 0,
 			},
+			// Base(30) + timing_weak(25) - catchall_empty(20) = 35
 			expectedScoreMin: 30,
 			expectedScoreMax: 40,
 			expectedReach:    models.ReachabilityBad,
@@ -104,8 +108,82 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedStatus:   models.StatusCatchAll,
 		},
 
+		// ── Domain age signal cases ───────────────────────────────────────────
+		{
+			// Regression test for tarun@validus.sg production case.
+			// Google Workspace catch-all, 10+ year old domain, SPF+DMARC+SaaS.
+			// Previously scored 28 (Bad). Should be ~63 (Risky).
+			//
+			// Base(30) + SPF(3.5) + DMARC(4.5) + SaaS(10) + vetted_age(15) = 63
+			// No catchall_empty penalty: isEstablishedDomain=true.
+			name: "Google Workspace catch-all, vetted domain age (validus.sg regression)",
+			input: models.RiskAnalysis{
+				IsCatchAll:    true,
+				MxProvider:    "google",
+				HasSPF:        true,
+				HasDMARC:      true,
+				HasSaaSTokens: true,
+				DomainAgeDays: 3903,
+				TimingDeltaMs: 137,
+			},
+			expectedScoreMin: 58,
+			expectedScoreMax: 68,
+			expectedReach:    models.ReachabilityRisky,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			// Established domain (1–5 years) gets the smaller age boost.
+			name: "Catch-all, established domain age (1-5 years)",
+			input: models.RiskAnalysis{
+				IsCatchAll:    true,
+				MxProvider:    "google",
+				HasSPF:        true,
+				HasDMARC:      true,
+				DomainAgeDays: 730, // 2 years
+			},
+			// Base(30) + SPF(3.5) + DMARC(4.5) + established_age(10) = 48
+			// No catchall_empty: isEstablishedDomain=true
+			expectedScoreMin: 43,
+			expectedScoreMax: 53,
+			expectedReach:    models.ReachabilityBad,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			// New domain (< 30 days) with no proof still gets the new-domain penalty.
+			name: "New domain catch-all (< 30 days), no proof",
+			input: models.RiskAnalysis{
+				IsCatchAll:    true,
+				MxProvider:    "generic",
+				DomainAgeDays: 10,
+			},
+			// Base(30) - new_domain(50) - catchall_empty(20) = -40 → clamped to 0
+			expectedScoreMin: 0,
+			expectedScoreMax: 5,
+			expectedReach:    models.ReachabilityBad,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			// DomainAgeDays == 0 means RDAP returned no data, not that the domain
+			// is new. The age boost should NOT fire; the empty penalty still applies.
+			name: "Unknown domain age (RDAP returned 0) — no boost, penalty applies",
+			input: models.RiskAnalysis{
+				IsCatchAll:    true,
+				MxProvider:    "google",
+				DomainAgeDays: 0,
+			},
+			// Base(30) - catchall_empty(20) = 10
+			expectedScoreMin: 5,
+			expectedScoreMax: 15,
+			expectedReach:    models.ReachabilityBad,
+			expectedStatus:   models.StatusCatchAll,
+		},
+
 		// ── Enterprise gateway catch-all cases ────────────────────────────────
 		{
+			// Regression test for gmehta@raine.com.
+			// Barracuda catch-all, SPF+DMARC+SaaS, unknown domain age.
+			// Base(30) + enterprise_sec(15) + SaaS(10) + SPF(3.5) + DMARC(4.5) = 63
+			// No catchall_empty: hasEnterpriseGateway=true.
 			name: "Barracuda catch-all with SPF+DMARC+SaaS (raine.com regression)",
 			input: models.RiskAnalysis{
 				IsCatchAll:    true,
@@ -121,8 +199,6 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{
-			// Proofpoint catch-all — same logic, confirms Barracuda fix doesn't
-			// break existing enterprise gateway behaviour.
 			name: "Proofpoint catch-all with SPF+DMARC",
 			input: models.RiskAnalysis{
 				IsCatchAll: true,
@@ -137,8 +213,7 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{
-			// Empty catch-all on a generic domain — penalty still applies.
-			name: "Generic catch-all, no footprint, no enterprise gateway",
+			name: "Generic catch-all, no footprint, unknown age — penalty applies",
 			input: models.RiskAnalysis{
 				IsCatchAll: true,
 				MxProvider: "generic",
@@ -187,6 +262,7 @@ func TestCalculateRobustScore(t *testing.T) {
 				MxProvider:       "office365",
 				HasTeamsPresence: false,
 				HasSharePoint:    false,
+				DomainAgeDays:    0,
 			},
 			// Base(30) - o365_ghost(30) = 0
 			expectedScoreMin: 0,
@@ -211,13 +287,13 @@ func TestCalculateRobustScore(t *testing.T) {
 		// ── O365 zombie correction cases (SmtpStatus = 250) ──────────────────
 		{
 			name: "O365 Zombie: SMTP 250 but no SharePoint or Teams (Ghost)",
-			// Base(90) - correction(60) - ghost(30) = 0
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
 				MxProvider:       "office365",
 				HasTeamsPresence: false,
 				HasSharePoint:    false,
 			},
+			// Base(90) - correction(60) - ghost(30) = 0
 			expectedScoreMin: 0,
 			expectedScoreMax: 5,
 			expectedReach:    models.ReachabilityBad,
@@ -225,13 +301,13 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 		{
 			name: "O365 Zombie: SMTP 250, Teams identity exists, no SharePoint license",
-			// Base(90) - correction(60) - unlicensed(20) + Teams(15) = 25
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
 				MxProvider:       "office365",
 				HasTeamsPresence: true,
 				HasSharePoint:    false,
 			},
+			// Base(90) - correction(60) - unlicensed(20) + Teams(15) = 25
 			expectedScoreMin: 20,
 			expectedScoreMax: 30,
 			expectedReach:    models.ReachabilityBad,
@@ -239,7 +315,6 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 		{
 			name: "O365 Zombie with soft proof partially recovers score",
-			// Base(90) - correction(60) - unlicensed(20) + Teams(15) + GitHub(12) = 37
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
 				MxProvider:       "office365",
@@ -247,6 +322,7 @@ func TestCalculateRobustScore(t *testing.T) {
 				HasSharePoint:    false,
 				HasGitHub:        true,
 			},
+			// Base(90) - correction(60) - unlicensed(20) + Teams(15) + GitHub(12) = 37
 			expectedScoreMin: 32,
 			expectedScoreMax: 42,
 			expectedReach:    models.ReachabilityBad,
@@ -254,13 +330,13 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 		{
 			name: "O365 valid: SMTP 250 with SharePoint — correction does NOT fire",
-			// Base(90) + SharePoint(60) = 150 → clamped to 99
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
 				MxProvider:       "office365",
 				HasTeamsPresence: true,
 				HasSharePoint:    true,
 			},
+			// Base(90) + SharePoint(60) = 150 → 99
 			expectedScoreMin: 90,
 			expectedScoreMax: 99,
 			expectedReach:    models.ReachabilitySafe,
@@ -268,8 +344,6 @@ func TestCalculateRobustScore(t *testing.T) {
 		},
 		{
 			name: "O365 Ghost: SMTP 250, no footprint, but has breach history",
-			// Base(90) - correction(60) - ghost(30) + Breach(45) = 45
-			// Status stays catch_all despite breach (o365ZombieCorrected=true)
 			input: models.RiskAnalysis{
 				SmtpStatus:       250,
 				MxProvider:       "office365",
@@ -277,6 +351,8 @@ func TestCalculateRobustScore(t *testing.T) {
 				HasSharePoint:    false,
 				BreachCount:      1,
 			},
+			// Base(90) - correction(60) - ghost(30) + Breach(45) = 45
+			// Status stays catch_all: o365ZombieCorrected=true blocks upgrade
 			expectedScoreMin: 40,
 			expectedScoreMax: 50,
 			expectedReach:    models.ReachabilityBad,
@@ -296,8 +372,6 @@ func TestCalculateRobustScore(t *testing.T) {
 
 		// ── Google Calendar false positive guard ──────────────────────────────
 		{
-			// Verifies that a legitimate Google Calendar signal on a real
-			// Google Workspace catch-all still produces a Safe score.
 			name: "Google Workspace catch-all with legitimate Calendar signal",
 			input: models.RiskAnalysis{
 				IsCatchAll:        true,
@@ -305,8 +379,9 @@ func TestCalculateRobustScore(t *testing.T) {
 				HasSPF:            true,
 				HasDMARC:          true,
 				HasGoogleCalendar: true,
+				DomainAgeDays:     3903,
 			},
-			// Base(30) + Calendar(42.5) + SPF(3.5) + DMARC(4.5) + strong(50) = 130.5 → 99
+			// Base(30) + Calendar(42.5) + SPF(3.5) + DMARC(4.5) + vetted(15) + strong(50) = 145.5 → 99
 			expectedScoreMin: 90,
 			expectedScoreMax: 99,
 			expectedReach:    models.ReachabilitySafe,

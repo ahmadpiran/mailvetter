@@ -22,6 +22,21 @@ const (
 
 	WeightSPF   = 3.5
 	WeightDMARC = 4.5
+
+	// Domain age thresholds and their corresponding score boosts.
+	//
+	// Domain age is already collected via CheckDomainAge but was only ever
+	// used as a penalty signal (new domain < 30 days = -50). A domain that
+	// has been live for over a year is strong evidence of a legitimate,
+	// actively managed organisation — this signal deserves a positive reward.
+	//
+	// Thresholds chosen to match industry practice:
+	//   > 365 days  — survived at least one renewal cycle, low spam risk
+	//   > 1825 days — 5+ years, high-confidence established business
+	DomainAgeThresholdEstablished = 365
+	DomainAgeThresholdVetted      = 1825
+	WeightDomainAgeEstablished    = 10.0
+	WeightDomainAgeVetted         = 15.0
 )
 
 func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64, models.Reachability, models.VerificationStatus) {
@@ -53,10 +68,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	}
 
 	// ── 3. O365 zombie correction (SmtpStatus == 250 only) ───────────────────
-	//
-	// Office 365 returns SMTP 250 for users who exist in Azure AD but have no
-	// Exchange license or have been blocked. This block fires only when SMTP
-	// claimed 250 — O365 catch-alls (SmtpStatus == 0) are handled in step 6.
 	o365ZombieCorrected := false
 
 	if analysis.MxProvider == "office365" && analysis.SmtpStatus == 250 && !analysis.HasSharePoint {
@@ -117,17 +128,13 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		score += boost
 		breakdown["p1_historical_breach"] = boost
 
-		// Upgrade catch-all to valid on breach proof — unless the zombie
-		// correction already determined the mailbox cannot receive mail.
 		if status == models.StatusCatchAll && !o365ZombieCorrected {
 			status = models.StatusValid
 		}
 	}
 
-	// Enterprise security gateways: Proofpoint, Mimecast, and Barracuda are
-	// all paid products deployed exclusively by real organisations. Their
-	// presence is strong evidence the domain is actively managed for business
-	// mail — equivalent signal strength regardless of which vendor is used.
+	// Enterprise security gateways are paid products deployed exclusively by
+	// real organisations — strong evidence of active business mail management.
 	hasEnterpriseGateway := analysis.MxProvider == "proofpoint" ||
 		analysis.MxProvider == "mimecast" ||
 		analysis.MxProvider == "barracuda"
@@ -158,6 +165,21 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		breakdown["p2_timing_weak"] = 25.0
 	}
 
+	// Domain age positive signal.
+	// Domain age 0 means the RDAP lookup returned no data (not that the domain
+	// is brand new), so we only apply the boost when age is explicitly known.
+	if analysis.DomainAgeDays >= DomainAgeThresholdVetted {
+		score += WeightDomainAgeVetted
+		breakdown["p2_domain_age_vetted"] = WeightDomainAgeVetted
+	} else if analysis.DomainAgeDays >= DomainAgeThresholdEstablished {
+		score += WeightDomainAgeEstablished
+		breakdown["p2_domain_age_established"] = WeightDomainAgeEstablished
+	}
+
+	// isEstablishedDomain is used in catch-all resolution below to determine
+	// whether the empty-catch-all penalty should be waived.
+	isEstablishedDomain := analysis.DomainAgeDays >= DomainAgeThresholdEstablished
+
 	// ── 5. Penalties (only when no proof exists to shield them) ──────────────
 	if !hasAbsoluteProof && !hasSoftProof {
 		if analysis.EntropyScore > 0.5 {
@@ -168,6 +190,9 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 			score -= 10.0
 			breakdown["penalty_role_account"] = -10.0
 		}
+		// New-domain penalty is skipped for established domains — the two
+		// signals are mutually exclusive by definition, but guard it explicitly
+		// to make the logic clear and safe against future changes.
 		if analysis.DomainAgeDays > 0 && analysis.DomainAgeDays < 30 {
 			score -= 50.0
 			breakdown["penalty_new_domain"] = -50.0
@@ -184,7 +209,9 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 			score += 25.0
 			breakdown["resolution_catchall_medium"] = 25.0
 		} else {
-			if !hasEnterpriseGateway {
+			applyEmptyPenalty := !hasEnterpriseGateway && !isEstablishedDomain
+
+			if applyEmptyPenalty {
 				if analysis.MxProvider == "office365" {
 					score += -30.0
 					breakdown["penalty_o365_ghost"] = -30.0
