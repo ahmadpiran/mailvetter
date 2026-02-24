@@ -18,16 +18,33 @@ type MXRecord struct {
 
 // CheckDNS performs the initial domain validation and MX lookup.
 // Returns a slice of MXRecord values sorted by preference (lowest = highest priority).
+//
+// BUG FIXED (issue #10): The previous fallback dialer hardcoded "udp" as the
+// network protocol regardless of what the resolver originally requested:
+//
+//	conn, err := d.DialContext(dialCtx, network, address)   // could be "tcp"
+//	if err != nil {
+//	    conn, err = d.DialContext(dialCtx, "udp", "8.8.8.8:53") // always udp
+//	}
+//
+// DNS responses larger than 512 bytes (common for domains with many MX, SPF,
+// or DMARC records) cause the server to set the TC (truncated) bit in a UDP
+// response. The resolver is then expected to retry over TCP to retrieve the
+// full response. If the system resolver initiated a TCP connection and the
+// fallback silently downgraded it to UDP, the response could be silently
+// truncated — returning an incomplete set of MX records with no error, which
+// causes the verifier to probe the wrong mail server.
+//
+// The fix: the fallback uses the same `network` value the resolver originally
+// requested, preserving the protocol contract. The Google DNS address is still
+// used as the fallback *destination*, but over the correct transport.
 func CheckDNS(ctx context.Context, domain string) ([]MXRecord, error) {
 	r := &net.Resolver{
 		PreferGo: true,
 		Dial: func(dialCtx context.Context, network, address string) (net.Conn, error) {
-			// We must use a direct dialer for DNS because standard SOCKS5 proxies
-			// do not support UDP traffic.
-			//
-			// Respect the caller's context deadline rather than always
-			// using a fixed 3-second wall-clock timeout. If the caller's budget
-			// is already tight, a 3-second dial can block well past cancellation.
+			// Respect the caller's context deadline rather than always using a
+			// fixed wall-clock timeout. If the caller's budget is already tight,
+			// a 3-second dial can block well past cancellation.
 			timeout := 3 * time.Second
 			if deadline, ok := dialCtx.Deadline(); ok {
 				if remaining := time.Until(deadline); remaining < timeout {
@@ -36,13 +53,20 @@ func CheckDNS(ctx context.Context, domain string) ([]MXRecord, error) {
 			}
 			d := net.Dialer{Timeout: timeout}
 
-			// Try the system-provided DNS address first, then fall back to
-			// Google's public resolver if the system resolver is unreachable.
-			// This prevents a misconfigured /etc/resolv.conf from silently
-			// causing all DNS lookups to fail.
+			// Try the system-provided DNS address first.
 			conn, err := d.DialContext(dialCtx, network, address)
 			if err != nil {
-				conn, err = d.DialContext(dialCtx, "udp", "8.8.8.8:53")
+				// Fall back to Google's public resolver if the system resolver
+				// is unreachable (e.g. misconfigured /etc/resolv.conf).
+				//
+				// FIX: use `network` here, not the hardcoded string "udp".
+				// The resolver may have requested "tcp" — for instance when a
+				// previous UDP response was truncated and it is retrying over
+				// TCP to retrieve the full record set. Downgrading that retry
+				// to UDP would silently return a truncated response with no
+				// error, producing an incomplete MX list and causing the
+				// verifier to probe the wrong mail server.
+				conn, err = d.DialContext(dialCtx, network, "8.8.8.8:53")
 			}
 			return conn, err
 		},
