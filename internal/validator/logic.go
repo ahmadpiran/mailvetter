@@ -303,7 +303,12 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string, pURL *u
 	var targetErr error
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		targetValid, targetTime, targetErr = lookup.CheckSMTP(ctx, primaryMX, email, pURL)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		targetValid, targetTime, targetErr = lookup.CheckSMTP(ctx, primaryMX, email, currentProxy)
 		targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
 
 		if !targetTransient {
@@ -311,7 +316,7 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string, pURL *u
 		}
 
 		if attempt == 1 {
-			log.Printf("[DEBUG] Transient error via proxy for TARGET %s, retrying... Error: %v", email, targetErr)
+			log.Printf("[DEBUG] Transient error via proxy for TARGET %s, retrying direct... Error: %v", email, targetErr)
 			select {
 			case <-time.After(2 * time.Second):
 			case <-ctx.Done():
@@ -340,7 +345,12 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string, pURL *u
 	var ghostErr error
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail, pURL)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail, currentProxy)
 		ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
 
 		if !ghostTransient {
@@ -348,7 +358,7 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string, pURL *u
 		}
 
 		if attempt == 1 {
-			log.Printf("[DEBUG] Transient error via proxy for GHOST %s, retrying...", ghostEmail)
+			log.Printf("[DEBUG] Transient error via proxy for GHOST %s, retrying direct...", ghostEmail)
 			select {
 			case <-time.After(2 * time.Second):
 			case <-ctx.Done():

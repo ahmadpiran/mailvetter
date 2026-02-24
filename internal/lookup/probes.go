@@ -96,7 +96,12 @@ func CheckGoogleCalendar(ctx context.Context, email string, pURL *url.URL) bool 
 		}
 		req.Header.Set("User-Agent", getRandomUserAgent())
 
-		resp, err := DoProxiedRequest(req, pURL)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		resp, err := DoProxiedRequest(req, currentProxy)
 		if err != nil {
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
@@ -194,7 +199,12 @@ func CheckGravatar(ctx context.Context, email string, pURL *url.URL) bool {
 		}
 		req.Header.Set("User-Agent", getRandomUserAgent())
 
-		resp, err := DoProxiedRequest(req, pURL)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		resp, err := DoProxiedRequest(req, currentProxy)
 		if err != nil {
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
@@ -229,7 +239,12 @@ func CheckGitHub(ctx context.Context, email string, pURL *url.URL) bool {
 		}
 		req.Header.Set("User-Agent", getRandomUserAgent())
 
-		resp, err := DoProxiedRequest(req, pURL)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		resp, err := DoProxiedRequest(req, currentProxy)
 		if err != nil {
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)

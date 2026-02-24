@@ -29,7 +29,12 @@ func CheckHIBP(ctx context.Context, email, apiKey string, pURL *url.URL) int {
 		req.Header.Set("hibp-api-key", apiKey)
 		req.Header.Set("User-Agent", "Mailvetter-Verifier")
 
-		resp, err := DoProxiedRequest(req, pURL)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		resp, err := DoProxiedRequest(req, currentProxy)
 		if err != nil {
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)

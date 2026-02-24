@@ -28,7 +28,12 @@ func CheckAdobe(ctx context.Context, email string, pURL *url.URL) bool {
 		req.Header.Set("X-IMS-ClientId", "AdobeID_v2_1")
 		req.Header.Set("User-Agent", getRandomUserAgent())
 
-		resp, err := DoProxiedRequest(req, pURL)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		resp, err := DoProxiedRequest(req, currentProxy)
 		if err != nil {
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
@@ -77,7 +82,12 @@ func CheckDomainAge(ctx context.Context, domain string, pURL *url.URL) int {
 		}
 		req.Header.Set("Accept", "application/rdap+json")
 
-		resp, err := DoProxiedRequest(req, pURL)
+		currentProxy := pURL
+		if attempt == 2 {
+			currentProxy = nil
+		}
+
+		resp, err := DoProxiedRequest(req, currentProxy)
 		if err != nil {
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
