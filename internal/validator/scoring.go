@@ -58,6 +58,10 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	}
 
 	// ── 3. O365 zombie correction (SmtpStatus == 250 only) ───────────────────
+	//
+	// o365ZombieCorrected is propagated to step 9 to prevent zombie-corrected
+	// accounts from being upgraded to StatusRisky — the mailbox is known to
+	// be undeliverable regardless of how many positive signals exist elsewhere.
 	o365ZombieCorrected := false
 
 	if analysis.MxProvider == "office365" && analysis.SmtpStatus == 250 && !analysis.HasSharePoint {
@@ -123,9 +127,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		}
 	}
 
-	// hasEnterpriseGateway is true when the domain routes mail through a paid
-	// enterprise security product. All four are exclusive to real organisations
-	// and carry equivalent signal weight for scoring purposes.
 	hasEnterpriseGateway := analysis.MxProvider == "proofpoint" ||
 		analysis.MxProvider == "mimecast" ||
 		analysis.MxProvider == "barracuda" ||
@@ -157,8 +158,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		breakdown["p2_timing_weak"] = 25.0
 	}
 
-	// Domain age positive signal.
-	// DomainAgeDays == 0 means RDAP returned no data — boost does not fire.
 	if analysis.DomainAgeDays >= DomainAgeThresholdVetted {
 		score += WeightDomainAgeVetted
 		breakdown["p2_domain_age_vetted"] = WeightDomainAgeVetted
@@ -195,9 +194,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 			score += 25.0
 			breakdown["resolution_catchall_medium"] = 25.0
 		} else {
-			// Penalty waived for enterprise-gateway domains and established
-			// domains (> 1 year). Both are strong indicators of deliberate
-			// catch-all configuration rather than abandonment.
 			applyEmptyPenalty := !hasEnterpriseGateway && !isEstablishedDomain
 
 			if applyEmptyPenalty {
@@ -224,7 +220,7 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		}
 	}
 
-	// ── 8. Clamp, band, return ────────────────────────────────────────────────
+	// ── 8. Clamp and band ─────────────────────────────────────────────────────
 	finalScore := int(math.Round(score))
 	if finalScore > 99 {
 		finalScore = 99
@@ -239,6 +235,11 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		reachability = models.ReachabilityRisky
 	} else {
 		reachability = models.ReachabilityBad
+	}
+
+	// ── 9. Catch-all status upgrade ───────────────────────────────────────────
+	if status == models.StatusCatchAll && !o365ZombieCorrected && finalScore >= 60 {
+		status = models.StatusRisky
 	}
 
 	return finalScore, breakdown, reachability, status

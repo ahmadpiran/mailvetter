@@ -6,6 +6,7 @@ type Reachability string
 const (
 	StatusValid    VerificationStatus = "valid"
 	StatusInvalid  VerificationStatus = "invalid"
+	StatusRisky    VerificationStatus = "risky"
 	StatusCatchAll VerificationStatus = "catch_all"
 	StatusUnknown  VerificationStatus = "unknown"
 
