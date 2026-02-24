@@ -34,6 +34,10 @@ var sharedClient = &http.Client{
 	},
 }
 
+// sharedNoRedirectClient reuses the same underlying Transport (and therefore
+// the same connection pool) as sharedClient, but does not follow redirects.
+// Used by probes where a redirect itself is the meaningful signal (e.g.
+// SharePoint 302, Microsoft Autodiscover 302).
 var sharedNoRedirectClient = &http.Client{
 	Timeout: 15 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -67,9 +71,7 @@ func DoProxiedRequest(req *http.Request, pURL *url.URL) (*http.Response, error) 
 }
 
 // doProxiedNoRedirectRequest is identical to DoProxiedRequest but uses
-// sharedNoRedirectClient so that HTTP redirects are not followed. This is
-// the correct building block for probes where a 302/301 response is itself
-// the positive signal (SharePoint, Microsoft Autodiscover).
+// sharedNoRedirectClient so that HTTP redirects are not followed.
 func doProxiedNoRedirectRequest(req *http.Request, pURL *url.URL) (*http.Response, error) {
 	reqCtx := context.WithValue(req.Context(), proxyCtxKey, pURL)
 	req = req.WithContext(reqCtx)
@@ -113,7 +115,22 @@ func CheckTeamsPresence(ctx context.Context, email, domain string, pURL *url.URL
 	return CheckMicrosoftLogin(ctx, email, pURL)
 }
 
+// CheckGoogleCalendar probes the CalDAV endpoint to detect whether the email
+// address corresponds to an active Google account with a calendar.
 func CheckGoogleCalendar(ctx context.Context, email string, pURL *url.URL) bool {
+	// Guard: extract domain and verify it uses Google MX before probing.
+	// Running this probe against non-Google domains produces meaningless 401s
+	// that the scoring engine would misinterpret as proof of existence.
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return false
+	}
+	domain := parts[1]
+
+	if !CheckGoogleWorkspace(ctx, domain) {
+		return false
+	}
+
 	target := fmt.Sprintf("https://calendar.google.com/calendar/dav/%s/events", email)
 
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -137,7 +154,7 @@ func CheckGoogleCalendar(ctx context.Context, email string, pURL *url.URL) bool 
 			return false
 		}
 
-		if resp.StatusCode == 403 || resp.StatusCode == 429 || resp.StatusCode >= 500 {
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
 			resp.Body.Close()
 			if attempt == 1 {
 				time.Sleep(500 * time.Millisecond)
@@ -146,7 +163,15 @@ func CheckGoogleCalendar(ctx context.Context, email string, pURL *url.URL) bool 
 			return false
 		}
 
-		isOk := resp.StatusCode == 401 || resp.StatusCode == 200
+		// Only 200 is a genuine positive: the calendar is publicly accessible,
+		// which is unusual enough to be a reliable existence signal.
+		//
+		// 401 is explicitly excluded. On Google CalDAV, 401 means "you need to
+		// authenticate" — Google returns this for every unauthenticated request
+		// regardless of whether the target address exists or has a calendar.
+		// Treating 401 as a positive was the root cause of false-positive scores
+		// on catch-all domains routed through non-Google MX providers.
+		isOk := resp.StatusCode == 200
 		resp.Body.Close()
 		return isOk
 	}
@@ -304,6 +329,11 @@ func CheckGitHub(ctx context.Context, email string, pURL *url.URL) bool {
 
 // CheckMicrosoftLogin probes the Office 365 Autodiscover endpoint to determine
 // whether an email address has an active Microsoft identity.
+//
+// Previously this function managed proxy.Semaphore manually without a defer,
+// which could permanently leak a slot on any early return or panic. It now
+// routes through doProxiedNoRedirectRequest which handles acquire/release
+// correctly via defer — no manual semaphore management at this call site.
 func CheckMicrosoftLogin(ctx context.Context, email string, pURL *url.URL) bool {
 	targetURL := fmt.Sprintf(
 		"https://outlook.office365.com/autodiscover/autodiscover.json?Email=%s&Protocol=Autodiscoverv1",
@@ -322,10 +352,6 @@ func CheckMicrosoftLogin(ctx context.Context, email string, pURL *url.URL) bool 
 			currentProxy = nil
 		}
 
-		// doProxiedNoRedirectRequest acquires the semaphore slot (if a proxy is
-		// configured), injects the proxy URL into the request context, and
-		// releases the slot via defer before returning — unconditionally, even
-		// on panic. There is no way to leak the slot from this call site.
 		resp, err := doProxiedNoRedirectRequest(req, currentProxy)
 		if err != nil {
 			if attempt == 1 {

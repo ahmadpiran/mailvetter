@@ -277,3 +277,67 @@ func TestCalculateRobustScore(t *testing.T) {
 		})
 	}
 }
+
+func TestGoogleCalendarFalsePositive(t *testing.T) {
+	tests := []struct {
+		name             string
+		input            models.RiskAnalysis
+		expectedScoreMin int
+		expectedScoreMax int
+		expectedReach    models.Reachability
+		expectedStatus   models.VerificationStatus
+	}{
+		{
+			// Reproduces the gmehta@raine.com production case.
+			// Barracuda catch-all with SPF + DMARC + SaaS tokens but no
+			// social footprint and a negligible timing delta.
+			// Expected: Risky, not Safe.
+			name: "Barracuda catch-all, no Google Calendar, no social proof",
+			input: models.RiskAnalysis{
+				IsCatchAll:        true,
+				MxProvider:        "barracuda",
+				HasSPF:            true,
+				HasDMARC:          true,
+				HasSaaSTokens:     true,
+				HasGoogleCalendar: false, // probe correctly returns false now
+				TimingDeltaMs:     58,    // too low to be a timing signal
+			},
+			// Base(30) + SPF(3.5) + DMARC(4.5) + SaaS(10) - catchall_empty(20) = 28
+			expectedScoreMin: 20,
+			expectedScoreMax: 35,
+			expectedReach:    models.ReachabilityBad,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			name: "Google Workspace catch-all with legitimate Calendar signal",
+			input: models.RiskAnalysis{
+				IsCatchAll:        true,
+				MxProvider:        "google",
+				HasSPF:            true,
+				HasDMARC:          true,
+				HasGoogleCalendar: true, // legitimate positive on a Google MX domain
+			},
+			// Base(30) + Calendar(42.5) + SPF(3.5) + DMARC(4.5) + strong(50) = 130.5 → 99
+			expectedScoreMin: 90,
+			expectedScoreMax: 99,
+			expectedReach:    models.ReachabilitySafe,
+			expectedStatus:   models.StatusValid,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			score, _, reach, status := CalculateRobustScore(tt.input)
+
+			if score < tt.expectedScoreMin || score > tt.expectedScoreMax {
+				t.Errorf("Score %d not in range [%d, %d]", score, tt.expectedScoreMin, tt.expectedScoreMax)
+			}
+			if reach != tt.expectedReach {
+				t.Errorf("Reachability %q != expected %q", reach, tt.expectedReach)
+			}
+			if tt.expectedStatus != "" && status != tt.expectedStatus {
+				t.Errorf("Status %q != expected %q", status, tt.expectedStatus)
+			}
+		})
+	}
+}
