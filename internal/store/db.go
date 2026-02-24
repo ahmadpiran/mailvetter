@@ -10,7 +10,7 @@ import (
 
 var DB *pgxpool.Pool
 
-// Init connects to Postgres and runs migrations
+// Init connects to Postgres and runs migrations.
 func Init(connString string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -21,7 +21,6 @@ func Init(connString string) error {
 		return fmt.Errorf("unable to connect to database: %w", err)
 	}
 
-	// Verify connection
 	if err := DB.Ping(ctx); err != nil {
 		return fmt.Errorf("database ping failed: %w", err)
 	}
@@ -29,35 +28,62 @@ func Init(connString string) error {
 	return runMigrations(ctx)
 }
 
-// runMigrations creates the necessary tables if they don't exist
 func runMigrations(ctx context.Context) error {
-	// Table: jobs (Tracks bulk upload batches)
+	// Table: jobs — tracks bulk upload batches.
 	queryJobs := `
 	CREATE TABLE IF NOT EXISTS jobs (
-		id TEXT PRIMARY KEY,
-		status TEXT NOT NULL,
-		total_count INT DEFAULT 0,
-		processed_count INT DEFAULT 0,
-		created_at TIMESTAMP DEFAULT NOW(),
-		completed_at TIMESTAMP
+		id             TEXT      PRIMARY KEY,
+		status         TEXT      NOT NULL,
+		total_count    INT       DEFAULT 0,
+		processed_count INT      DEFAULT 0,
+		created_at     TIMESTAMP DEFAULT NOW(),
+		completed_at   TIMESTAMP
 	);`
 
-	// Table: results (Stores individual email verification data)
-	// We store the full JSON result so we can re-analyze later if needed.
+	// Table: results — stores individual email verification data.
+	// The full JSON result is stored so it can be re-analysed later without
+	// re-running the verification probes.
 	queryResults := `
 	CREATE TABLE IF NOT EXISTS results (
-		id SERIAL PRIMARY KEY,
-		job_id TEXT NOT NULL REFERENCES jobs(id),
-		email TEXT NOT NULL,
-		score INT NOT NULL,
-		data JSONB NOT NULL
+		id      SERIAL  PRIMARY KEY,
+		job_id  TEXT    NOT NULL REFERENCES jobs(id),
+		email   TEXT    NOT NULL,
+		score   INT     NOT NULL,
+		data    JSONB   NOT NULL
 	);`
 
-	if _, err := DB.Exec(ctx, queryJobs); err != nil {
-		return fmt.Errorf("migration failed (jobs): %w", err)
+	// Index 1 (critical): makes all job_id-filtered queries O(log n).
+	queryIdxResultsJobID := `
+	CREATE INDEX IF NOT EXISTS idx_results_job_id
+		ON results (job_id);`
+
+	// Index 2: supports status-filtered queries on the jobs table.
+	queryIdxJobsStatus := `
+	CREATE INDEX IF NOT EXISTS idx_jobs_status
+		ON jobs (status);`
+
+	// Index 3: composite index that satisfies both the job_id filter AND the
+	// ORDER BY id ASC in the /results handler in a single index scan, avoiding
+	// a separate sort step on large result sets.
+	queryIdxResultsJobIDID := `
+	CREATE INDEX IF NOT EXISTS idx_results_job_id_id
+		ON results (job_id, id);`
+
+	migrations := []struct {
+		name  string
+		query string
+	}{
+		{"create table jobs", queryJobs},
+		{"create table results", queryResults},
+		{"create index idx_results_job_id", queryIdxResultsJobID},
+		{"create index idx_jobs_status", queryIdxJobsStatus},
+		{"create index idx_results_job_id_id", queryIdxResultsJobIDID},
 	}
-	if _, err := DB.Exec(ctx, queryResults); err != nil {
-		return fmt.Errorf("migration failed (results): %w", err)
+
+	for _, m := range migrations {
+		if _, err := DB.Exec(ctx, m.query); err != nil {
+			return fmt.Errorf("migration failed (%s): %w", m.name, err)
+		}
 	}
 
 	return nil
