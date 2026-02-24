@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"mailvetter/internal/cache"
 	"mailvetter/internal/lookup"
 	"mailvetter/internal/models"
+	"mailvetter/internal/proxy"
 )
 
 type DomainResult struct {
@@ -35,6 +37,11 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 	result := models.ValidationResult{Email: email}
 	var mu sync.Mutex
 
+	var pinnedProxy *url.URL
+	if proxy.Enabled() {
+		pinnedProxy = proxy.Global.Next()
+	}
+
 	if lookup.IsDisposableDomain(domain) {
 		result.Status = models.StatusInvalid
 		result.Score = 0
@@ -53,7 +60,6 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 
 	var wg sync.WaitGroup
 
-	// --- Collector A: Infra ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -81,7 +87,7 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			HasSPF:        lookup.CheckSPF(ctx, domain),
 			HasDMARC:      lookup.CheckDMARC(ctx, domain),
 			HasSaaSTokens: lookup.CheckSaaSTokens(ctx, domain),
-			DomainAge:     lookup.CheckDomainAge(ctx, domain),
+			DomainAge:     lookup.CheckDomainAge(ctx, domain, pinnedProxy),
 		}
 
 		cache.DomainCache.Set(cacheKey, res, 15*time.Minute)
@@ -95,16 +101,12 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		mu.Unlock()
 	}()
 
-	// --- Collector B: SMTP & Protocols ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
 		mxRecords, err := lookup.CheckDNS(ctx, domain)
 		if err != nil || len(mxRecords) == 0 {
-			// FIX: Guard this write with the mutex like all other analysis writes.
-			// Without it, -race flags a data race against the reads that happen
-			// in CalculateRobustScore after the outer wg.Wait() returns.
 			mu.Lock()
 			analysis.SmtpStatus = 0
 			mu.Unlock()
@@ -113,7 +115,7 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		sort.Slice(mxRecords, func(i, j int) bool { return mxRecords[i].Pref < mxRecords[j].Pref })
 		primaryMX := mxRecords[0].Host
 
-		if lookup.CheckVRFY(ctx, primaryMX, email) {
+		if lookup.CheckVRFY(ctx, primaryMX, email, pinnedProxy) {
 			mu.Lock()
 			analysis.HasVRFY = true
 			analysis.SmtpStatus = 250
@@ -130,7 +132,7 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			cachedHost = val.(SmtpHostResult)
 			hostCached = true
 		} else {
-			isBroken = !lookup.CheckPostmaster(ctx, primaryMX, domain)
+			isBroken = !lookup.CheckPostmaster(ctx, primaryMX, domain, pinnedProxy)
 			cachedHost.IsPostmasterBroken = isBroken
 		}
 
@@ -138,20 +140,15 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			time.Sleep(500 * time.Millisecond)
 		}
 
-		status, delta, isCatchAll := runSmtpProbes(ctx, email, domain, primaryMX)
+		status, delta, isCatchAll := runSmtpProbes(ctx, email, domain, primaryMX, pinnedProxy)
 
-		// Use a context-aware sleep so a tight deadline isn't held up for
-		// 250ms waiting on a jitter re-probe that will be discarded anyway.
-		// If the context expires during the pause we proceed with the values we
-		// already have rather than blocking or returning empty results.
 		if isCatchAll && delta > 100 && delta < 400 {
 			select {
 			case <-time.After(250 * time.Millisecond):
-				status2, delta2, _ := runSmtpProbes(ctx, email, domain, primaryMX)
+				status2, delta2, _ := runSmtpProbes(ctx, email, domain, primaryMX, pinnedProxy)
 				delta = (delta + delta2) / 2
 				status = status2
 			case <-ctx.Done():
-				// Proceed with current values; finalize block below handles the rest.
 			}
 		}
 
@@ -160,21 +157,18 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			cache.DomainCache.Set(hostCacheKey, cachedHost, 30*time.Minute)
 		}
 
-		// Never overwrite live Catch-All status with cached data.
-		// Only use the cache for IsPostmasterBroken, which doesn't change per-email.
 		mu.Lock()
 		if hostCached {
 			analysis.IsPostmasterBroken = cachedHost.IsPostmasterBroken
 		} else {
 			analysis.IsPostmasterBroken = isBroken
 		}
-		analysis.IsCatchAll = isCatchAll // Always trust the live probe
+		analysis.IsCatchAll = isCatchAll
 		analysis.SmtpStatus = status
 		analysis.TimingDeltaMs = delta
 		mu.Unlock()
 	}()
 
-	// --- Collector C: Probes & History ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -186,7 +180,7 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			if lookup.CheckGoogleCalendar(ctx, email) {
+			if lookup.CheckGoogleCalendar(ctx, email, pinnedProxy) {
 				mu.Lock()
 				hasGCal = true
 				mu.Unlock()
@@ -196,7 +190,7 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			if lookup.CheckTeamsPresence(ctx, email, domain) {
+			if lookup.CheckTeamsPresence(ctx, email, domain, pinnedProxy) {
 				mu.Lock()
 				hasTeams = true
 				mu.Unlock()
@@ -206,7 +200,7 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			if lookup.CheckSharePoint(ctx, email) {
+			if lookup.CheckSharePoint(ctx, email, pinnedProxy) {
 				mu.Lock()
 				hasSharePoint = true
 				mu.Unlock()
@@ -216,7 +210,7 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			if lookup.CheckAdobe(ctx, email) {
+			if lookup.CheckAdobe(ctx, email, pinnedProxy) {
 				mu.Lock()
 				hasAdobe = true
 				mu.Unlock()
@@ -226,7 +220,7 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			if lookup.CheckGravatar(ctx, email) {
+			if lookup.CheckGravatar(ctx, email, pinnedProxy) {
 				mu.Lock()
 				hasGravatar = true
 				mu.Unlock()
@@ -236,7 +230,7 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 		probeWg.Add(1)
 		go func() {
 			defer probeWg.Done()
-			if lookup.CheckGitHub(ctx, email) {
+			if lookup.CheckGitHub(ctx, email, pinnedProxy) {
 				mu.Lock()
 				hasGitHub = true
 				mu.Unlock()
@@ -248,14 +242,13 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			probeWg.Add(1)
 			go func() {
 				defer probeWg.Done()
-				bc := lookup.CheckHIBP(ctx, email, apiKey)
+				bc := lookup.CheckHIBP(ctx, email, apiKey, pinnedProxy)
 				mu.Lock()
 				breachCount = bc
 				mu.Unlock()
 			}()
 		}
 
-		// Context-Aware WaitGroup for OSINT probes
 		c := make(chan struct{})
 		go func() {
 			defer close(c)
@@ -274,12 +267,10 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 			analysis.BreachCount = breachCount
 			mu.Unlock()
 		case <-ctx.Done():
-			// Safely abort if the worker context expires
 			return
 		}
 	}()
 
-	// Context-Aware WaitGroup for the main collectors
 	c := make(chan struct{})
 	go func() {
 		defer close(c)
@@ -306,23 +297,20 @@ func VerifyEmail(ctx context.Context, email, domain string) (models.ValidationRe
 	}
 }
 
-func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, int64, bool) {
+func runSmtpProbes(ctx context.Context, email, domain, primaryMX string, pURL *url.URL) (int, int64, bool) {
 	var targetValid bool
 	var targetTime time.Duration
 	var targetErr error
 
-	// 1. Run Target Probe FIRST
 	for attempt := 1; attempt <= 2; attempt++ {
-		targetValid, targetTime, targetErr = lookup.CheckSMTP(ctx, primaryMX, email)
-
+		targetValid, targetTime, targetErr = lookup.CheckSMTP(ctx, primaryMX, email, pURL)
 		targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
 
 		if !targetTransient {
-			break // Success or Hard Bounce! We can stop retrying.
+			break
 		}
 
 		if attempt == 1 {
-			// Actually print the targetErr so we can see why it failed!
 			log.Printf("[DEBUG] Transient error via proxy for TARGET %s, retrying... Error: %v", email, targetErr)
 			select {
 			case <-time.After(2 * time.Second):
@@ -333,23 +321,17 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	}
 
 	targetTransient := !targetValid && targetErr != nil && !lookup.IsNoSuchUserError(targetErr)
-
-	// If the target completely timed out or had a transient error we couldn't recover from:
 	if targetTransient {
 		return 0, 0, false
 	}
 
-	// If Target is a Hard Bounce, return immediately!
-	// No need to waste proxy bandwidth or risk rate limits with a Ghost probe.
 	if !targetValid && lookup.IsNoSuchUserError(targetErr) {
-		// Log the final failure reason
 		log.Printf("[ERROR] Final target transient failure for %s: %v", email, targetErr)
 		return 550, 0, false
 	}
 
 	time.Sleep(500 * time.Millisecond)
 
-	// 2. Run Ghost Probe ONLY if Target was Valid (Checking for Catch-All)
 	randomUser := generateRandomString(12)
 	ghostEmail := randomUser + "@" + domain
 
@@ -358,8 +340,7 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	var ghostErr error
 
 	for attempt := 1; attempt <= 2; attempt++ {
-		ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail)
-
+		ghostValid, ghostTime, ghostErr = lookup.CheckSMTP(ctx, primaryMX, ghostEmail, pURL)
 		ghostTransient := !ghostValid && ghostErr != nil && !lookup.IsNoSuchUserError(ghostErr)
 
 		if !ghostTransient {
@@ -376,8 +357,6 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 		}
 	}
 
-	// Calculate timing delta. Even though probes are sequential now, tarpitting delays
-	// (e.g. server intentionally sleeping 5s before replying) will still be captured here.
 	delta := int64(0)
 	if ghostTime > 0 && targetTime > 0 {
 		d := float64(ghostTime.Milliseconds()) - float64(targetTime.Milliseconds())
@@ -390,16 +369,13 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	status := 0
 	isCatchAll := false
 
-	// Evaluate final status
 	if targetValid {
 		if ghostHardBounced {
-			status = 250 // Target OK, Ghost Dead = Confirmed Valid
+			status = 250
 		} else if ghostValid {
 			status = 0
-			isCatchAll = true // Target OK, Ghost OK = Catch-All
+			isCatchAll = true
 		} else if ghostTransient {
-			// Target OK, but Ghost dropped the connection or rate-limited us.
-			// Optimistically assume valid rather than penalizing the valid target.
 			status = 250
 		}
 	}
@@ -407,23 +383,17 @@ func runSmtpProbes(ctx context.Context, email, domain, primaryMX string) (int, i
 	return status, delta, isCatchAll
 }
 
-// generateRandomString creates a realistic fake human email.
-// Using words like "test", "bounce", or pure hex strings triggers enterprise
-// spam heuristics. By mimicking a standard corporate "first.last" format,
-// we bypass the edge firewall and force the server to do a real directory lookup.
 func generateRandomString(_ int) string {
 	firstNames := []string{"alex", "michael", "sarah", "david", "emma", "chris", "jessica", "matthew", "amanda", "daniel"}
 	lastNames := []string{"smith", "jones", "taylor", "brown", "williams", "wilson", "johnson", "davis", "miller", "martin"}
 
 	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {
-		return "michael.smith.99" // Safe fallback
+		return "michael.smith.99"
 	}
 
 	fIdx := int(b[0]) % len(firstNames)
 	lIdx := int(b[1]) % len(lastNames)
 
-	// Creates a highly realistic email format: first.last.hex
-	// Example: david.taylor.a7@domain.com
 	return firstNames[fIdx] + "." + lastNames[lIdx] + "." + hex.EncodeToString(b[2:])
 }

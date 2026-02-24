@@ -7,22 +7,19 @@ import (
 	"mailvetter/internal/proxy"
 	"net"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"time"
 )
 
 const (
-	HeloHost = "mta1.mailvetter.com" // Identify yourself politely
+	HeloHost = "mta1.mailvetter.com"
 	MailFrom = ""
 )
 
-// Prevents the VPS IP from being banned by Google/Outlook for opening too many concurrent connections.
 var SMTPSemaphore = make(chan struct{}, 15)
 
-// CheckSMTP performs a standard probe via direct or proxy connection,
-// with adaptive protocol speeds to bypass enterprise tarpits.
-func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, time.Duration, error) {
-	// Semaphore acquisition is now context-aware.
+func CheckSMTP(ctx context.Context, mxHost string, targetEmail string, pURL *url.URL) (bool, time.Duration, error) {
 	select {
 	case SMTPSemaphore <- struct{}{}:
 	case <-ctx.Done():
@@ -33,8 +30,8 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 	var conn net.Conn
 	var err error
 
-	if proxy.SMTPEnabled {
-		conn, err = proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
+	if proxy.SMTPEnabled && pURL != nil {
+		conn, err = proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second, pURL)
 	} else {
 		d := net.Dialer{Timeout: 10 * time.Second}
 		conn, err = d.DialContext(ctx, "tcp4", mxHost+":25")
@@ -45,24 +42,13 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 	}
 
 	start := time.Now()
-
-	// 1. Detect Strict Enterprise Gateways (SEGs)
 	mxLower := strings.ToLower(mxHost)
 	isStrictEnterprise := false
 
 	strictGateways := []string{
-		"mimecast.com",          // Mimecast
-		"pphosted.com",          // Proofpoint
-		"barracudanetworks.com", // Barracuda
-		"messagelabs.com",       // Symantec / Broadcom MessageLabs
-		"iphmx.com",             // Cisco IronPort
-		"trendmicro.com",        // Trend Micro
-		"trendmicro.eu",         // Trend Micro (EU)
-		"sophos.com",            // Sophos
-		"mailcontrol.com",       // Forcepoint / Websense
-		"mxlogic.net",           // McAfee / Trellix
-		"fireeye.com",           // FireEye
-		"mx.cloudflare.net",     // Cloudflare Area 1
+		"mimecast.com", "pphosted.com", "barracudanetworks.com", "messagelabs.com",
+		"iphmx.com", "trendmicro.com", "trendmicro.eu", "sophos.com",
+		"mailcontrol.com", "mxlogic.net", "fireeye.com", "mx.cloudflare.net",
 	}
 
 	for _, gw := range strictGateways {
@@ -72,9 +58,6 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		}
 	}
 
-	// 2. Adjust connection deadline
-	// If we are artificially delaying commands, we need to give the connection
-	// more time to live so we don't accidentally time ourselves out.
 	deadlineOffset := 12 * time.Second
 	if isStrictEnterprise {
 		deadlineOffset = 16 * time.Second
@@ -86,7 +69,6 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 	}
 	conn.SetDeadline(deadline)
 
-	// NEW: Use textproto directly instead of smtp.NewClient!
 	tp := textproto.NewConn(conn)
 	defer tp.Close()
 
@@ -102,12 +84,10 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		}
 	}
 
-	// 1. Read 220 Welcome Banner
 	if _, _, err := tp.ReadResponse(220); err != nil {
 		return false, time.Since(start), fmt.Errorf("banner timeout/rejected: %w", err)
 	}
 
-	// 2. Send HELO directly (bypassing EHLO localhost)
 	if err := smartDelay(); err != nil {
 		return false, time.Since(start), err
 	}
@@ -118,7 +98,6 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		return false, time.Since(start), fmt.Errorf("HELO rejected: %w", err)
 	}
 
-	// 3. Send MAIL FROM
 	if err := smartDelay(); err != nil {
 		return false, time.Since(start), err
 	}
@@ -129,7 +108,6 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		return false, time.Since(start), fmt.Errorf("MAIL FROM rejected: %w", err)
 	}
 
-	// 4. Send RCPT TO
 	if err := smartDelay(); err != nil {
 		return false, time.Since(start), err
 	}
@@ -137,7 +115,6 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		return false, time.Since(start), err
 	}
 
-	// Read ANY response (0) instead of expecting exactly 25.
 	code, msg, err := tp.ReadResponse(0)
 	elapsed := time.Since(start)
 
@@ -147,22 +124,15 @@ func CheckSMTP(ctx context.Context, mxHost string, targetEmail string) (bool, ti
 		return false, elapsed, fmt.Errorf("network read error: %w", err)
 	}
 
-	// Manually check for success codes (250 OK or 251 Forwarded)
 	if code == 250 || code == 251 {
 		return true, elapsed, nil
 	}
 
-	// If the server rejected the email (5xx or 4xx), package the error
-	// so IsNoSuchUserError can read it properly!
 	return false, elapsed, &textproto.Error{Code: code, Msg: msg}
 }
 
-// CheckPostmaster verifies if the domain accepts emails to postmaster.
-// Returns true (postmaster working) on any non-definitive failure to avoid
-// incorrectly marking a domain as broken due to transient network issues.
-// Note: rate-limit and timeout errors both cause this to return true (fail open).
-func CheckPostmaster(ctx context.Context, mxHost, domain string) bool {
-	success, _, err := CheckSMTP(ctx, mxHost, "postmaster@"+domain)
+func CheckPostmaster(ctx context.Context, mxHost, domain string, pURL *url.URL) bool {
+	success, _, err := CheckSMTP(ctx, mxHost, "postmaster@"+domain, pURL)
 	if success {
 		return true
 	}
@@ -172,9 +142,7 @@ func CheckPostmaster(ctx context.Context, mxHost, domain string) bool {
 	return true
 }
 
-// CheckVRFY attempts to verify the user using the VRFY command.
-func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
-	// Semaphore acquisition is now context-aware, same as CheckSMTP.
+func CheckVRFY(ctx context.Context, mxHost string, targetEmail string, pURL *url.URL) bool {
 	select {
 	case SMTPSemaphore <- struct{}{}:
 	case <-ctx.Done():
@@ -185,8 +153,8 @@ func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
 	var conn net.Conn
 	var err error
 
-	if proxy.SMTPEnabled {
-		conn, err = proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second)
+	if proxy.SMTPEnabled && pURL != nil {
+		conn, err = proxy.DialContext(ctx, "tcp", mxHost+":25", 10*time.Second, pURL)
 	} else {
 		d := net.Dialer{Timeout: 10 * time.Second}
 		conn, err = d.DialContext(ctx, "tcp", mxHost+":25")
@@ -197,7 +165,6 @@ func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
 	}
 	defer conn.Close()
 
-	// Respect the context deadline instead of a fixed 10-second wall-clock offset.
 	deadline := time.Now().Add(10 * time.Second)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
@@ -220,10 +187,6 @@ func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
 		return false
 	}
 
-	// tp.Cmd() returns a pipeline MsgId (a small incrementing integer),
-	// NOT the SMTP response code. The previous code compared this id against 250/251,
-	// which could never be true, making CheckVRFY silently always return false.
-	// The response code must be read separately via tp.ReadResponse().
 	if _, err = tp.Cmd("VRFY %s", targetEmail); err != nil {
 		return false
 	}
@@ -231,26 +194,16 @@ func CheckVRFY(ctx context.Context, mxHost string, targetEmail string) bool {
 	return err == nil && (code == 250 || code == 251)
 }
 
-// --- Helper Functions ---
-
-// IsNoSuchUserError determines if the SMTP error means the mailbox does not exist.
 func IsNoSuchUserError(err error) bool {
 	if err == nil {
 		return false
 	}
-
 	errStr := strings.ToLower(err.Error())
 
-	// 1. ABSOLUTE PROOF OF INVALID USER (Check this FIRST!)
-	// 5.1.1 = standard missing user
-	// 5.1.0 = standard address rejected
-	// 5.4.1 = Office 365 specific "Recipient address rejected: Access denied"
 	if strings.Contains(errStr, "5.1.1") || strings.Contains(errStr, "5.1.0") || strings.Contains(errStr, "5.4.1") {
 		return true
 	}
 
-	// 2. SHIELD: Check for block/spam/policy keywords
-	// If the server explicitly says "blocked", it is a network error, NOT a missing user.
 	blockKeywords := []string{
 		"spam", "block", "banned", "blacklisted", "ip", "policy",
 		"relay", "access denied", "rejected by network", "unauthenticated",
@@ -265,7 +218,6 @@ func IsNoSuchUserError(err error) bool {
 		}
 	}
 
-	// 3. Keywords explicitly indicating missing user
 	keywords := []string{
 		"does not exist", "user unknown", "no such user",
 		"recipient rejected", "not found", "invalid mailbox",
@@ -279,7 +231,6 @@ func IsNoSuchUserError(err error) bool {
 		}
 	}
 
-	// 4. Fallback: If we didn't hit a blocklist word, and we see standard 550/551
 	var textErr *textproto.Error
 	if errors.As(err, &textErr) {
 		if textErr.Code == 550 || textErr.Code == 551 {
@@ -290,18 +241,14 @@ func IsNoSuchUserError(err error) bool {
 	return false
 }
 
-// IsRateLimitError checks if the server is asking us to slow down.
 func IsRateLimitError(err error) bool {
 	if err == nil {
 		return false
 	}
-
-	// Prefer structured error code checks over string matching.
 	var textErr *textproto.Error
 	if errors.As(err, &textErr) {
 		return textErr.Code == 450 || textErr.Code == 451 || textErr.Code == 452
 	}
-
 	errStr := strings.ToLower(err.Error())
 	return strings.Contains(errStr, "450") ||
 		strings.Contains(errStr, "451") ||

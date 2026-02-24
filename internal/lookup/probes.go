@@ -15,18 +15,16 @@ import (
 	"mailvetter/internal/proxy"
 )
 
+type contextKey string
+
+const proxyCtxKey contextKey = "proxyURL"
+
 var sharedClient = &http.Client{
-	// The 15-second client-level Timeout has been removed.
-	// All probe requests are made with http.NewRequestWithContext, so the caller's
-	// context deadline is already the primary cancellation mechanism. A hard client
-	// timeout here would silently override context deadlines shorter than 15s,
-	// causing probes to block well past the point the caller has given up.
-	// A 20-second backstop is kept only as a last resort for contexts with no deadline.
 	Timeout: 20 * time.Second,
 	Transport: &http.Transport{
 		Proxy: func(req *http.Request) (*url.URL, error) {
-			if proxy.Enabled() {
-				return proxy.Global.Next(), nil
+			if p, ok := req.Context().Value(proxyCtxKey).(*url.URL); ok && p != nil {
+				return p, nil
 			}
 			return nil, nil
 		},
@@ -45,13 +43,11 @@ func getRandomUserAgent() string {
 	return userAgents[rand.Intn(len(userAgents))]
 }
 
-// DoProxiedRequest executes an HTTP request, routing it through the proxy semaphore
-// when a proxy is enabled to cap concurrent outbound connections.
-func DoProxiedRequest(req *http.Request) (*http.Response, error) {
-	if proxy.Enabled() {
-		// Semaphore acquisition is now context-aware.
-		// Previously this blocked unconditionally, meaning a caller with an expired
-		// context would sit here waiting for a free proxy slot indefinitely.
+func DoProxiedRequest(req *http.Request, pURL *url.URL) (*http.Response, error) {
+	reqCtx := context.WithValue(req.Context(), proxyCtxKey, pURL)
+	req = req.WithContext(reqCtx)
+
+	if pURL != nil && proxy.Enabled() {
 		select {
 		case proxy.Semaphore <- struct{}{}:
 		case <-req.Context().Done():
@@ -61,8 +57,6 @@ func DoProxiedRequest(req *http.Request) (*http.Response, error) {
 	}
 	return sharedClient.Do(req)
 }
-
-// --- INFRASTRUCTURE ---
 
 func CheckOffice365(ctx context.Context, domain string) bool {
 	mxRecords, err := CheckDNS(ctx, domain)
@@ -88,38 +82,37 @@ func CheckGoogleWorkspace(ctx context.Context, domain string) bool {
 	return false
 }
 
-// --- APP PROBES ---
-
-// CheckTeamsPresence verifies user existence via the Microsoft login endpoint.
-// We no longer require sipfederationtls SRV records, as modern O365 tenants
-// often omit them, which previously caused massive false negatives.
-func CheckTeamsPresence(ctx context.Context, email, domain string) bool {
-	return CheckMicrosoftLogin(ctx, email)
+func CheckTeamsPresence(ctx context.Context, email, domain string, pURL *url.URL) bool {
+	return CheckMicrosoftLogin(ctx, email, pURL)
 }
 
-// CheckGoogleCalendar probes the CalDAV endpoint for the given email.
-// A 401 response indicates the user exists but requires authentication.
-// Note: PROPFIND would be more semantically appropriate here, but many
-// CalDAV servers do not respond consistently to it without auth headers.
-func CheckGoogleCalendar(ctx context.Context, email string) bool {
+func CheckGoogleCalendar(ctx context.Context, email string, pURL *url.URL) bool {
 	url := fmt.Sprintf("https://calendar.google.com/calendar/dav/%s/events", email)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := DoProxiedRequest(req)
-	if err != nil {
-		return false
+	for attempt := 1; attempt <= 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return false
+		}
+		req.Header.Set("User-Agent", getRandomUserAgent())
+
+		resp, err := DoProxiedRequest(req, pURL)
+		if err != nil {
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return false
+		}
+
+		isOk := resp.StatusCode == 401 || resp.StatusCode == 200
+		resp.Body.Close()
+		return isOk
 	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 401 || resp.StatusCode == 200
+	return false
 }
 
-// CheckSharePoint probes the user's personal OneDrive/SharePoint URL.
-// A 401 or 403 response indicates the personal site exists but requires auth.
-func CheckSharePoint(ctx context.Context, email string) bool {
+func CheckSharePoint(ctx context.Context, email string, pURL *url.URL) bool {
 	parts := strings.Split(email, "@")
 	if len(parts) != 2 {
 		return false
@@ -136,132 +129,166 @@ func CheckSharePoint(ctx context.Context, email string) bool {
 
 	baseTenant := domainParts[0]
 	userPath := fmt.Sprintf("%s_%s", user, strings.ReplaceAll(domain, ".", "_"))
-
 	url := fmt.Sprintf("https://%s-my.sharepoint.com/personal/%s", baseTenant, userPath)
 
-	// FIX 1: By NOT specifying a Transport, we bypass the proxy manager entirely.
-	// This forces the request to go out via the direct VPS IP, which we proved
-	// via curl is highly trusted by Microsoft.
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse // Trap the 302 Redirect!
+			return http.ErrUseLastResponse
 		},
+		Transport: sharedClient.Transport,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return false
+	for attempt := 1; attempt <= 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return false
+		}
+		req.Header.Set("User-Agent", getRandomUserAgent())
+
+		reqCtx := context.WithValue(ctx, proxyCtxKey, pURL)
+		req = req.WithContext(reqCtx)
+
+		if pURL != nil && proxy.Enabled() {
+			select {
+			case proxy.Semaphore <- struct{}{}:
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		resp, err := client.Do(req)
+
+		if pURL != nil && proxy.Enabled() {
+			<-proxy.Semaphore
+		}
+
+		if err != nil {
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			log.Printf("[DEBUG-OSINT] SharePoint HTTP Error for %s: %v", email, err)
+			return false
+		}
+
+		log.Printf("[DEBUG-OSINT] SharePoint returned Status %d for %s", resp.StatusCode, email)
+		isOk := resp.StatusCode == 403 || resp.StatusCode == 401 || resp.StatusCode == 200 || resp.StatusCode == 302
+		resp.Body.Close()
+		return isOk
 	}
-	req.Header.Set("User-Agent", getRandomUserAgent())
-
-	// FIX 2: Completely removed the proxy.Semaphore block here.
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[DEBUG-OSINT] SharePoint HTTP Error for %s: %v", email, err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	log.Printf("[DEBUG-OSINT] SharePoint returned Status %d for %s", resp.StatusCode, email)
-
-	// 403/401 = Exists but protected
-	// 200 = Exists and public
-	// 302 = Redirects to AccessDenied.aspx (Absolute Proof!)
-	return resp.StatusCode == 403 || resp.StatusCode == 401 || resp.StatusCode == 200 || resp.StatusCode == 302
+	return false
 }
 
-// --- SOCIAL PROBES ---
-
-func CheckGravatar(ctx context.Context, email string) bool {
+func CheckGravatar(ctx context.Context, email string, pURL *url.URL) bool {
 	cleanEmail := strings.TrimSpace(strings.ToLower(email))
 	hash := md5.Sum([]byte(cleanEmail))
 	hashString := fmt.Sprintf("%x", hash)
 	url := fmt.Sprintf("https://www.gravatar.com/avatar/%s?d=404", hashString)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("User-Agent", getRandomUserAgent())
-
-	resp, err := DoProxiedRequest(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 200
-}
-
-func CheckGitHub(ctx context.Context, email string) bool {
-	url := fmt.Sprintf("https://api.github.com/search/users?q=%s+in:email", email)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("User-Agent", getRandomUserAgent())
-
-	resp, err := DoProxiedRequest(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 200 {
-		var result struct {
-			TotalCount int `json:"total_count"`
+	for attempt := 1; attempt <= 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return false
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
-			return result.TotalCount > 0
+		req.Header.Set("User-Agent", getRandomUserAgent())
+
+		resp, err := DoProxiedRequest(req, pURL)
+		if err != nil {
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return false
 		}
+
+		isOk := resp.StatusCode == 200
+		resp.Body.Close()
+		return isOk
 	}
 	return false
 }
 
-type MicrosoftCredentialResponse struct {
-	Username       string `json:"Username"`
-	IfExistsResult int    `json:"IfExistsResult"`
+func CheckGitHub(ctx context.Context, email string, pURL *url.URL) bool {
+	url := fmt.Sprintf("https://api.github.com/search/users?q=%s+in:email", email)
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return false
+		}
+		req.Header.Set("User-Agent", getRandomUserAgent())
+
+		resp, err := DoProxiedRequest(req, pURL)
+		if err != nil {
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return false
+		}
+
+		if resp.StatusCode == 200 {
+			var result struct {
+				TotalCount int `json:"total_count"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+				resp.Body.Close()
+				return result.TotalCount > 0
+			}
+		}
+		resp.Body.Close()
+		return false
+	}
+	return false
 }
 
-func CheckMicrosoftLogin(ctx context.Context, email string) bool {
-	// The Office 365 Autodiscover API is a highly reliable, unauthenticated endpoint
-	// that bypasses Catch-Alls and is not heavily rate-limited.
+func CheckMicrosoftLogin(ctx context.Context, email string, pURL *url.URL) bool {
 	targetURL := fmt.Sprintf("https://outlook.office365.com/autodiscover/autodiscover.json?Email=%s&Protocol=Autodiscoverv1", url.QueryEscape(email))
 
-	// We MUST use a custom HTTP client to PREVENT following redirects.
-	// A valid user returns 200 OK. An invalid user returns a 302 Redirect.
-	// If we follow the redirect, it breaks the logic.
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse // Stop immediately on 302!
+			return http.ErrUseLastResponse
 		},
 		Transport: sharedClient.Transport,
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("User-Agent", getRandomUserAgent())
-
-	// Route through your proxy manager if enabled
-	if proxy.Enabled() {
-		select {
-		case proxy.Semaphore <- struct{}{}:
-		case <-ctx.Done():
+	for attempt := 1; attempt <= 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
+		if err != nil {
 			return false
 		}
-		defer func() { <-proxy.Semaphore }()
-	}
+		req.Header.Set("User-Agent", getRandomUserAgent())
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
+		reqCtx := context.WithValue(req.Context(), proxyCtxKey, pURL)
+		req = req.WithContext(reqCtx)
 
-	// 200 OK means Microsoft successfully resolved the exact mailbox.
-	return resp.StatusCode == 200
+		if pURL != nil && proxy.Enabled() {
+			select {
+			case proxy.Semaphore <- struct{}{}:
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		resp, err := client.Do(req)
+
+		if pURL != nil && proxy.Enabled() {
+			<-proxy.Semaphore
+		}
+
+		if err != nil {
+			if attempt == 1 {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			return false
+		}
+
+		isOk := resp.StatusCode == 200
+		resp.Body.Close()
+		return isOk
+	}
+	return false
 }
