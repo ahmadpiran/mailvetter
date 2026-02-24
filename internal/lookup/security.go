@@ -8,9 +8,6 @@ import (
 
 // CheckSPF looks for a valid SPF record in TXT entries.
 func CheckSPF(ctx context.Context, domain string) bool {
-	// Use the context-aware resolver. The previous call to net.LookupTXT
-	// accepted ctx but never passed it anywhere, meaning a cancelled or timed-out
-	// context had no effect on these DNS calls.
 	txts, err := net.DefaultResolver.LookupTXT(ctx, domain)
 	if err != nil {
 		return false
@@ -26,8 +23,7 @@ func CheckSPF(ctx context.Context, domain string) bool {
 // CheckDMARC looks for a DMARC policy record.
 // Presence of DMARC implies active IT management of the domain.
 func CheckDMARC(ctx context.Context, domain string) bool {
-	// DMARC is always published at _dmarc.<domain>
-	txts, err := net.DefaultResolver.LookupTXT(ctx, "_dmarc."+domain) // FIX 1
+	txts, err := net.DefaultResolver.LookupTXT(ctx, "_dmarc."+domain)
 	if err != nil {
 		return false
 	}
@@ -43,17 +39,11 @@ func CheckDMARC(ctx context.Context, domain string) bool {
 // Finding tokens for tools like Salesforce or Zendesk proves the domain is
 // actively used for business operations, not just registered and parked.
 func CheckSaaSTokens(ctx context.Context, domain string) bool {
-	txts, err := net.DefaultResolver.LookupTXT(ctx, domain) // FIX 1
+	txts, err := net.DefaultResolver.LookupTXT(ctx, domain)
 	if err != nil {
 		return false
 	}
 
-	// Removed "google-site-verification" from this list.
-	// Almost every Google Workspace domain has this TXT record — it's an
-	// infrastructure ownership signal, not evidence of B2B SaaS usage.
-	// Including it caused the p1_saas_usage score boost to fire for the
-	// vast majority of Google-hosted domains regardless of actual tool adoption.
-	// Provider identification is already handled by IdentifyProvider.
 	indicators := []string{
 		"salesforce",
 		"zendesk",
@@ -75,20 +65,46 @@ func CheckSaaSTokens(ctx context.Context, domain string) bool {
 	return false
 }
 
-// IdentifyProvider analyzes MX records to categorize the email infrastructure.
-// Returns a canonical provider string: "proofpoint", "mimecast", "barracuda",
-// "google", "office365", or "generic". Never returns "unknown" — callers should
-// not need to normalise the return value.
+// IdentifyProvider analyses MX records to categorise the email infrastructure.
+// Returns a canonical provider string used by the scoring engine to apply
+// appropriate boosts and corrections.
+//
+// Recognised providers and their canonical names:
+//
+//	Enterprise security gateways (trigger p1_enterprise_sec boost):
+//	  "proofpoint" — Proofpoint (pphosted.com)
+//	  "mimecast"   — Mimecast (mimecast.com)
+//	  "barracuda"  — Barracuda Networks (barracudanetworks.com)
+//	  "ironport"   — Cisco IronPort / Cisco Secure Email (iphmx.com)
+//
+//	Major hosted providers:
+//	  "google"    — Google Workspace (google.com, googlemail.com)
+//	  "office365" — Microsoft 365 (outlook.com, protection.outlook.com)
+//
+//	Fallback:
+//	  "generic"   — anything not matched above
+//
+// CHANGE: Added "ironport" for iphmx.com (Cisco IronPort / Cisco Secure Email
+// Gateway). IronPort was already present in smtp.go's strictGateways list —
+// the SMTP layer correctly identified it as an enterprise gateway requiring
+// extended timeouts and careful handling — but it was absent from this function,
+// causing it to fall through to "generic". That meant the scoring engine never
+// awarded the p1_enterprise_sec boost and never exempted it from the
+// resolution_catchall_empty penalty, producing scores that were too low for
+// domains that have invested in Cisco's enterprise email security stack.
 func IdentifyProvider(ctx context.Context, domain string) (string, error) {
 	mxRecords, err := CheckDNS(ctx, domain)
 	if err != nil {
-		return "generic", err // FIX 3: Return "generic" on error, not "unknown".
+		return "generic", err
 	}
 
 	for _, mx := range mxRecords {
 		host := strings.ToLower(mx.Host)
 
-		// 1. Enterprise Security Gateways (High Value)
+		// ── Enterprise security gateways ─────────────────────────────────────
+		// Checked first because some organisations route through a gateway
+		// in front of Google or Microsoft, and the gateway is the more
+		// meaningful signal for scoring purposes.
 		if strings.Contains(host, "pphosted.com") {
 			return "proofpoint", nil
 		}
@@ -98,8 +114,16 @@ func IdentifyProvider(ctx context.Context, domain string) (string, error) {
 		if strings.Contains(host, "barracudanetworks.com") {
 			return "barracuda", nil
 		}
+		// iphmx.com is the MX hostname pattern for Cisco IronPort /
+		// Cisco Secure Email Gateway (formerly IronPort Systems, acquired
+		// by Cisco in 2007). It is a paid enterprise product deployed
+		// exclusively by mid-to-large organisations — the same signal
+		// strength as Proofpoint or Mimecast.
+		if strings.Contains(host, "iphmx.com") {
+			return "ironport", nil
+		}
 
-		// 2. Major Hosted Providers (High Reliability)
+		// ── Major hosted providers ────────────────────────────────────────────
 		if strings.Contains(host, "google.com") || strings.Contains(host, "googlemail.com") {
 			return "google", nil
 		}

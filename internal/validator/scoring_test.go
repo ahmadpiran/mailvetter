@@ -57,7 +57,7 @@ func TestCalculateRobustScore(t *testing.T) {
 				IsCatchAll:    true,
 				MxProvider:    "google",
 				TimingDeltaMs: 50,
-				DomainAgeDays: 0, // RDAP returned no data — penalty still applies
+				DomainAgeDays: 0,
 			},
 			// Base(30) - catchall_empty(20) = 10
 			expectedScoreMin: 5,
@@ -110,13 +110,7 @@ func TestCalculateRobustScore(t *testing.T) {
 
 		// ── Domain age signal cases ───────────────────────────────────────────
 		{
-			// Regression test for tarun@validus.sg production case.
-			// Google Workspace catch-all, 10+ year old domain, SPF+DMARC+SaaS.
-			// Previously scored 28 (Bad). Should be ~63 (Risky).
-			//
-			// Base(30) + SPF(3.5) + DMARC(4.5) + SaaS(10) + vetted_age(15) = 63
-			// No catchall_empty penalty: isEstablishedDomain=true.
-			name: "Google Workspace catch-all, vetted domain age (validus.sg regression)",
+			name: "Google Workspace catch-all, vetted domain age",
 			input: models.RiskAnalysis{
 				IsCatchAll:    true,
 				MxProvider:    "google",
@@ -132,14 +126,13 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{
-			// Established domain (1–5 years) gets the smaller age boost.
 			name: "Catch-all, established domain age (1-5 years)",
 			input: models.RiskAnalysis{
 				IsCatchAll:    true,
 				MxProvider:    "google",
 				HasSPF:        true,
 				HasDMARC:      true,
-				DomainAgeDays: 730, // 2 years
+				DomainAgeDays: 730,
 			},
 			// Base(30) + SPF(3.5) + DMARC(4.5) + established_age(10) = 48
 			// No catchall_empty: isEstablishedDomain=true
@@ -149,22 +142,19 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{
-			// New domain (< 30 days) with no proof still gets the new-domain penalty.
 			name: "New domain catch-all (< 30 days), no proof",
 			input: models.RiskAnalysis{
 				IsCatchAll:    true,
 				MxProvider:    "generic",
 				DomainAgeDays: 10,
 			},
-			// Base(30) - new_domain(50) - catchall_empty(20) = -40 → clamped to 0
+			// Base(30) - new_domain(50) - catchall_empty(20) = -40 → 0
 			expectedScoreMin: 0,
 			expectedScoreMax: 5,
 			expectedReach:    models.ReachabilityBad,
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{
-			// DomainAgeDays == 0 means RDAP returned no data, not that the domain
-			// is new. The age boost should NOT fire; the empty penalty still applies.
 			name: "Unknown domain age (RDAP returned 0) — no boost, penalty applies",
 			input: models.RiskAnalysis{
 				IsCatchAll:    true,
@@ -180,11 +170,7 @@ func TestCalculateRobustScore(t *testing.T) {
 
 		// ── Enterprise gateway catch-all cases ────────────────────────────────
 		{
-			// Regression test for gmehta@raine.com.
-			// Barracuda catch-all, SPF+DMARC+SaaS, unknown domain age.
-			// Base(30) + enterprise_sec(15) + SaaS(10) + SPF(3.5) + DMARC(4.5) = 63
-			// No catchall_empty: hasEnterpriseGateway=true.
-			name: "Barracuda catch-all with SPF+DMARC+SaaS (raine.com regression)",
+			name: "Barracuda catch-all with SPF+DMARC+SaaS",
 			input: models.RiskAnalysis{
 				IsCatchAll:    true,
 				MxProvider:    "barracuda",
@@ -196,6 +182,39 @@ func TestCalculateRobustScore(t *testing.T) {
 			expectedScoreMin: 58,
 			expectedScoreMax: 68,
 			expectedReach:    models.ReachabilityRisky,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			name: "IronPort catch-all with SPF+DMARC+SaaS+vetted age",
+			input: models.RiskAnalysis{
+				IsCatchAll:    true,
+				MxProvider:    "ironport",
+				HasSPF:        true,
+				HasDMARC:      true,
+				HasSaaSTokens: true,
+				DomainAgeDays: 8947,
+				TimingDeltaMs: 64,
+			},
+			expectedScoreMin: 73,
+			expectedScoreMax: 83,
+			expectedReach:    models.ReachabilityRisky,
+			expectedStatus:   models.StatusCatchAll,
+		},
+		{
+			// IronPort catch-all with no domain age data (RDAP returned 0).
+			// Enterprise gateway exempts the catch-all penalty but no age boost.
+			// Base(30) + enterprise_sec(15) + SPF(3.5) + DMARC(4.5) = 53
+			name: "IronPort catch-all, unknown domain age",
+			input: models.RiskAnalysis{
+				IsCatchAll:    true,
+				MxProvider:    "ironport",
+				HasSPF:        true,
+				HasDMARC:      true,
+				DomainAgeDays: 0,
+			},
+			expectedScoreMin: 48,
+			expectedScoreMax: 58,
+			expectedReach:    models.ReachabilityBad,
 			expectedStatus:   models.StatusCatchAll,
 		},
 		{

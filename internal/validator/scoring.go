@@ -23,16 +23,6 @@ const (
 	WeightSPF   = 3.5
 	WeightDMARC = 4.5
 
-	// Domain age thresholds and their corresponding score boosts.
-	//
-	// Domain age is already collected via CheckDomainAge but was only ever
-	// used as a penalty signal (new domain < 30 days = -50). A domain that
-	// has been live for over a year is strong evidence of a legitimate,
-	// actively managed organisation — this signal deserves a positive reward.
-	//
-	// Thresholds chosen to match industry practice:
-	//   > 365 days  — survived at least one renewal cycle, low spam risk
-	//   > 1825 days — 5+ years, high-confidence established business
 	DomainAgeThresholdEstablished = 365
 	DomainAgeThresholdVetted      = 1825
 	WeightDomainAgeEstablished    = 10.0
@@ -133,11 +123,13 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		}
 	}
 
-	// Enterprise security gateways are paid products deployed exclusively by
-	// real organisations — strong evidence of active business mail management.
+	// hasEnterpriseGateway is true when the domain routes mail through a paid
+	// enterprise security product. All four are exclusive to real organisations
+	// and carry equivalent signal weight for scoring purposes.
 	hasEnterpriseGateway := analysis.MxProvider == "proofpoint" ||
 		analysis.MxProvider == "mimecast" ||
-		analysis.MxProvider == "barracuda"
+		analysis.MxProvider == "barracuda" ||
+		analysis.MxProvider == "ironport"
 
 	if hasEnterpriseGateway {
 		score += WeightProofpoint
@@ -166,8 +158,7 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 	}
 
 	// Domain age positive signal.
-	// Domain age 0 means the RDAP lookup returned no data (not that the domain
-	// is brand new), so we only apply the boost when age is explicitly known.
+	// DomainAgeDays == 0 means RDAP returned no data — boost does not fire.
 	if analysis.DomainAgeDays >= DomainAgeThresholdVetted {
 		score += WeightDomainAgeVetted
 		breakdown["p2_domain_age_vetted"] = WeightDomainAgeVetted
@@ -176,8 +167,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 		breakdown["p2_domain_age_established"] = WeightDomainAgeEstablished
 	}
 
-	// isEstablishedDomain is used in catch-all resolution below to determine
-	// whether the empty-catch-all penalty should be waived.
 	isEstablishedDomain := analysis.DomainAgeDays >= DomainAgeThresholdEstablished
 
 	// ── 5. Penalties (only when no proof exists to shield them) ──────────────
@@ -190,9 +179,6 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 			score -= 10.0
 			breakdown["penalty_role_account"] = -10.0
 		}
-		// New-domain penalty is skipped for established domains — the two
-		// signals are mutually exclusive by definition, but guard it explicitly
-		// to make the logic clear and safe against future changes.
 		if analysis.DomainAgeDays > 0 && analysis.DomainAgeDays < 30 {
 			score -= 50.0
 			breakdown["penalty_new_domain"] = -50.0
@@ -209,6 +195,9 @@ func CalculateRobustScore(analysis models.RiskAnalysis) (int, map[string]float64
 			score += 25.0
 			breakdown["resolution_catchall_medium"] = 25.0
 		} else {
+			// Penalty waived for enterprise-gateway domains and established
+			// domains (> 1 year). Both are strong indicators of deliberate
+			// catch-all configuration rather than abandonment.
 			applyEmptyPenalty := !hasEnterpriseGateway && !isEstablishedDomain
 
 			if applyEmptyPenalty {
